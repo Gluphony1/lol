@@ -116,6 +116,12 @@ def clean_title(raw_title: str) -> tuple[str, str | None]:
         title,
         flags=re.IGNORECASE,
     )
+    title = re.sub(
+        r"\s+[-–—]\s+(?:part|track)\s+\d+\s+of\s+\d+\s*$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
     parts = re.split(r"\s+[-–—]\s+", title, maxsplit=1)
     if len(parts) == 2 and 1 < len(parts[0]) <= 80 and parts[1].strip():
         return clean_display_text(parts[1]), clean_display_text(parts[0])

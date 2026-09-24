@@ -3,6 +3,8 @@
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowDown,
+  ArrowUp,
   Bell,
   ChevronLeft,
   ChevronRight,
@@ -12,7 +14,6 @@ import {
   Home,
   Library,
   ListMusic,
-  ListPlus,
   Mic2,
   MoreHorizontal,
   Pause,
@@ -24,7 +25,9 @@ import {
   SkipBack,
   SkipForward,
   Sparkles,
+  Trash2,
   Volume2,
+  X,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -47,6 +50,13 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 
 type Track = {
   id: string;
@@ -185,6 +195,8 @@ export default function HomePage() {
   const [lyricsLanguage, setLyricsLanguage] = useState("");
   const [trackSuggestions, setTrackSuggestions] = useState<Track[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [upNext, setUpNext] = useState<Track[]>([]);
+  const [queueOpen, setQueueOpen] = useState(false);
   const [shuffleEnabled, setShuffleEnabled] = useState(false);
   const [repeatEnabled, setRepeatEnabled] = useState(false);
   const [backendReady, setBackendReady] = useState(false);
@@ -201,6 +213,7 @@ export default function HomePage() {
   const queueRef = useRef<Track[]>(tracks);
   const availableTracksRef = useRef<Track[]>(tracks);
   const warmedTracksRef = useRef<Set<string>>(new Set());
+  const upNextRef = useRef<Track[]>([]);
   const selectTrackRef = useRef<(track: Track) => void>(() => undefined);
   const playingRef = useRef(false);
   const viewerName = profileName || viewer?.displayName || "Luma listener";
@@ -246,6 +259,14 @@ export default function HomePage() {
   }, [activeNav, libraryTracks, query, recommendations, remoteResults]);
   const recentTracks = listeningHistory.length ? listeningHistory.map((item) => item.track) : tracks;
   const topArtist = tasteSeeds[0] || current.artist;
+  const autoplayTracks = useMemo(() => {
+    const queuedIds = new Set([current.videoId, ...upNext.map((track) => track.videoId)]);
+    const unique = new Map<string, Track>();
+    for (const track of [...trackSuggestions, ...recommendations, ...results]) {
+      if (!queuedIds.has(track.videoId)) unique.set(track.videoId, track);
+    }
+    return [...unique.values()].slice(0, 8);
+  }, [current.videoId, recommendations, results, trackSuggestions, upNext]);
   const activeLyricIndex = useMemo(() => {
     let active = -1;
     for (let index = 0; index < lyrics.length; index += 1) {
@@ -278,14 +299,52 @@ export default function HomePage() {
     void audio.play().catch(() => setPlayerError(true));
   }, []);
 
+  const commitUpNext = useCallback((items: Track[]) => {
+    const unique = items.filter((track, index, all) => all.findIndex((item) => item.videoId === track.videoId) === index);
+    upNextRef.current = unique;
+    setUpNext(unique);
+  }, []);
+
+  const playNext = useCallback((track: Track) => {
+    commitUpNext([track, ...upNextRef.current.filter((item) => item.videoId !== track.videoId)]);
+  }, [commitUpNext]);
+
+  const addToQueue = useCallback((track: Track) => {
+    if (track.videoId === currentRef.current.videoId || upNextRef.current.some((item) => item.videoId === track.videoId)) return;
+    commitUpNext([...upNextRef.current, track]);
+  }, [commitUpNext]);
+
+  const playFromQueue = useCallback((track: Track) => {
+    commitUpNext(upNextRef.current.filter((item) => item.videoId !== track.videoId));
+    selectTrack(track);
+  }, [commitUpNext, selectTrack]);
+
+  const removeFromQueue = useCallback((videoId: string) => {
+    commitUpNext(upNextRef.current.filter((item) => item.videoId !== videoId));
+  }, [commitUpNext]);
+
+  const moveInQueue = useCallback((index: number, direction: number) => {
+    const next = [...upNextRef.current];
+    const target = index + direction;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target], next[index]];
+    commitUpNext(next);
+  }, [commitUpNext]);
+
   const stepTrack = useCallback((direction: number) => {
+    if (direction > 0 && upNextRef.current.length) {
+      const [next, ...rest] = upNextRef.current;
+      commitUpNext(rest);
+      selectTrack(next);
+      return;
+    }
     const queue = queueRef.current.length ? queueRef.current : tracks;
     const index = queue.findIndex((track) => track.videoId === currentRef.current.videoId);
     const nextIndex = shuffleEnabled && direction > 0
       ? Math.floor(Math.random() * queue.length)
       : ((index < 0 ? 0 : index) + direction + queue.length) % queue.length;
     selectTrack(queue[nextIndex]);
-  }, [selectTrack, shuffleEnabled]);
+  }, [commitUpNext, selectTrack, shuffleEnabled]);
 
   const togglePlayback = useCallback(() => {
     const audio = audioRef.current;
@@ -366,7 +425,7 @@ export default function HomePage() {
     queueMicrotask(() => {
       if (!mounted) return;
       try {
-        const saved = JSON.parse(localStorage.getItem("luma-profile") || "null") as { liked?: string[]; likedTracks?: Track[]; current?: Track; volume?: number; listeningHistory?: ListeningRecord[]; playlists?: Playlist[]; profileName?: string; notificationsRead?: boolean } | null;
+        const saved = JSON.parse(localStorage.getItem("luma-profile") || "null") as { liked?: string[]; likedTracks?: Track[]; current?: Track; volume?: number; listeningHistory?: ListeningRecord[]; playlists?: Playlist[]; profileName?: string; notificationsRead?: boolean; upNext?: Track[] } | null;
         if (saved?.liked?.every((id) => typeof id === "string")) setLiked(saved.liked);
         if (Array.isArray(saved?.likedTracks)) setSavedLikedTracks(saved.likedTracks.map(normalizeSavedTrack));
         if (saved?.current && typeof saved.current.videoId === "string" && typeof saved.current.title === "string") {
@@ -385,6 +444,11 @@ export default function HomePage() {
             ...playlist,
             tracks: playlist.tracks.map(normalizeSavedTrack),
           })));
+        }
+        if (Array.isArray(saved?.upNext)) {
+          const restoredQueue = saved.upNext.filter((track) => track?.videoId && track?.title).map(normalizeSavedTrack).slice(0, 100);
+          upNextRef.current = restoredQueue;
+          setUpNext(restoredQueue);
         }
         if (Array.isArray(saved?.listeningHistory)) {
           setListeningHistory(saved.listeningHistory
@@ -553,10 +617,15 @@ export default function HomePage() {
   }, [backendReady, current.videoId, results, warmTrack]);
 
   useEffect(() => {
+    if (!backendReady) return;
+    upNext.slice(0, 3).forEach(warmTrack);
+  }, [backendReady, upNext, warmTrack]);
+
+  useEffect(() => {
     if (!profileReady) return;
     currentRef.current = current;
-    localStorage.setItem("luma-profile", JSON.stringify({ liked, likedTracks, current, volume, listeningHistory, playlists, profileName, notificationsRead }));
-  }, [current, liked, likedTracks, listeningHistory, notificationsRead, playlists, profileName, profileReady, volume]);
+    localStorage.setItem("luma-profile", JSON.stringify({ liked, likedTracks, current, volume, listeningHistory, playlists, profileName, notificationsRead, upNext }));
+  }, [current, liked, likedTracks, listeningHistory, notificationsRead, playlists, profileName, profileReady, upNext, volume]);
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
@@ -569,21 +638,15 @@ export default function HomePage() {
     navigator.mediaSession.playbackState = playing ? "playing" : "paused";
     navigator.mediaSession.setActionHandler("play", () => void audioRef.current?.play());
     navigator.mediaSession.setActionHandler("pause", () => audioRef.current?.pause());
-    const moveTrack = (direction: number) => {
-      const queue = queueRef.current.length ? queueRef.current : tracks;
-      const index = queue.findIndex((track) => track.videoId === currentRef.current.videoId);
-      const nextIndex = ((index < 0 ? 0 : index) + direction + queue.length) % queue.length;
-      selectTrackRef.current(queue[nextIndex]);
-    };
-    navigator.mediaSession.setActionHandler("previoustrack", () => moveTrack(-1));
-    navigator.mediaSession.setActionHandler("nexttrack", () => moveTrack(1));
+    navigator.mediaSession.setActionHandler("previoustrack", () => stepTrack(-1));
+    navigator.mediaSession.setActionHandler("nexttrack", () => stepTrack(1));
     return () => {
       navigator.mediaSession.setActionHandler("play", null);
       navigator.mediaSession.setActionHandler("pause", null);
       navigator.mediaSession.setActionHandler("previoustrack", null);
       navigator.mediaSession.setActionHandler("nexttrack", null);
     };
-  }, [current, playing]);
+  }, [current, playing, stepTrack]);
 
   useEffect(() => {
     const context = (document as Document & { modelContext?: ModelContext }).modelContext;
@@ -593,8 +656,9 @@ export default function HomePage() {
     void register({ name: "search_music", title: "Search Luma", description: "Search the local music catalog by song or artist.", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false }, annotations: { readOnlyHint: true, untrustedContentHint: false }, execute: ({ query: value }) => { if (typeof value !== "string" || !value.trim()) throw new Error("A search query is required."); setQuery(value); return { query: value, status: "searching" }; } });
     void register({ name: "play_track", title: "Play track", description: "Start a visible Luma search result by its exact title.", inputSchema: { type: "object", properties: { title: { type: "string" } }, required: ["title"], additionalProperties: false }, annotations: { readOnlyHint: false, untrustedContentHint: false }, execute: ({ title }) => { const match = availableTracksRef.current.find((track) => track.title.toLowerCase() === String(title).toLowerCase()); if (!match) throw new Error("Track not found."); selectTrackRef.current(match); return { title: match.title, artist: match.artist, status: "playing" }; } });
     void register({ name: "like_track", title: "Like track", description: "Add a visible Luma track to liked songs.", inputSchema: { type: "object", properties: { title: { type: "string" } }, required: ["title"], additionalProperties: false }, annotations: { readOnlyHint: false, untrustedContentHint: false }, execute: ({ title }) => { const match = availableTracksRef.current.find((track) => track.title.toLowerCase() === String(title).toLowerCase()); if (!match) throw new Error("Track not found."); setLiked((items) => items.includes(match.id) ? items : [...items, match.id]); setSavedLikedTracks((items) => items.some((track) => track.id === match.id) ? items : [...items, match]); return { title: match.title, status: "liked" }; } });
+    void register({ name: "queue_track", title: "Queue track", description: "Add a visible Luma track to play next or to the end of the queue.", inputSchema: { type: "object", properties: { title: { type: "string" }, position: { type: "string", enum: ["next", "last"] } }, required: ["title", "position"], additionalProperties: false }, annotations: { readOnlyHint: false, untrustedContentHint: false }, execute: ({ title, position }) => { const match = availableTracksRef.current.find((track) => track.title.toLowerCase() === String(title).toLowerCase()); if (!match) throw new Error("Track not found."); if (position === "next") playNext(match); else addToQueue(match); return { title: match.title, position, status: "queued" }; } });
     return () => lifecycle.abort();
-  }, []);
+  }, [addToQueue, playNext]);
 
   const handleInstall = async () => {
     if (!installPrompt) {
@@ -732,7 +796,25 @@ export default function HomePage() {
                       <span className="card-play">{current.videoId === track.videoId && playing ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}</span>
                       <span className="card-index">♪</span>
                     </button>
-                    <div className="card-meta"><div><h3>{track.title}</h3><p>{track.artist}</p>{track.reason && <small className="recommendation-reason">{track.reason}</small>}</div><div className="card-actions"><button className={liked.includes(track.id) ? "liked" : ""} onClick={() => toggleLike(track.id)} aria-label={liked.includes(track.id) ? "Remove from liked songs" : "Add to liked songs"}><Heart size={17} fill={liked.includes(track.id) ? "currentColor" : "none"} /></button><Popover><PopoverTrigger asChild><button aria-label={`Add ${track.title} to playlist`}><ListPlus size={17} /></button></PopoverTrigger><PopoverContent align="end" className="playlist-menu"><strong>Save to playlist</strong>{playlists.map((playlist) => { const included = playlist.tracks.some((item) => item.videoId === track.videoId); return <button key={playlist.id} onClick={() => togglePlaylistTrack(playlist.id, track)}><span>{playlist.name}</span><small>{included ? "Added" : `${playlist.tracks.length} songs`}</small></button>; })}{playlists.length === 0 && <p>Create your first playlist to save this song.</p>}<Button size="sm" onClick={() => setPlaylistOpen(true)}><Plus /> New playlist</Button></PopoverContent></Popover></div></div>
+                    <div className="card-meta">
+                      <div><h3>{track.title}</h3><p>{track.artist}</p>{track.reason && <small className="recommendation-reason">{track.reason}</small>}</div>
+                      <div className="card-actions">
+                        <button className={liked.includes(track.id) ? "liked" : ""} onClick={() => toggleLike(track.id)} aria-label={liked.includes(track.id) ? "Remove from liked songs" : "Add to liked songs"}><Heart size={17} fill={liked.includes(track.id) ? "currentColor" : "none"} /></button>
+                        <Popover>
+                          <PopoverTrigger asChild><button aria-label={`More options for ${track.title}`}><MoreHorizontal size={17} /></button></PopoverTrigger>
+                          <PopoverContent align="end" className="playlist-menu track-menu">
+                            <strong>Play and save</strong>
+                            <button onClick={() => playNext(track)}><span>Play next</span><small>Next</small></button>
+                            <button onClick={() => addToQueue(track)}><span>Add to queue</span><small>{upNext.some((item) => item.videoId === track.videoId) ? "Queued" : "Last"}</small></button>
+                            <div className="menu-divider" />
+                            <strong>Save to playlist</strong>
+                            {playlists.map((playlist) => { const included = playlist.tracks.some((item) => item.videoId === track.videoId); return <button key={playlist.id} onClick={() => togglePlaylistTrack(playlist.id, track)}><span>{playlist.name}</span><small>{included ? "Added" : `${playlist.tracks.length} songs`}</small></button>; })}
+                            {playlists.length === 0 && <p>Create your first playlist to save this song.</p>}
+                            <Button size="sm" onClick={() => setPlaylistOpen(true)}><Plus /> New playlist</Button>
+                          </PopoverContent>
+                        </Popover>
+                      </div>
+                    </div>
                   </article>
                 ))}
               </div>
@@ -776,6 +858,7 @@ export default function HomePage() {
             <button className="player-track-open" onClick={() => { setDetailOpen(true); navigate("Home"); }} aria-label={`Open ${current.title}`}><Image src={current.cover} alt={`${current.title} thumbnail`} width={58} height={58} unoptimized /></button>
             <button className="player-track-copy" onClick={() => { setDetailOpen(true); navigate("Home"); }}><strong>{current.title}</strong><span>{current.artist}</span>{playerError && <small>Audio unavailable — choose another song</small>}</button>
             <button className={liked.includes(current.id) ? "liked" : ""} onClick={() => toggleLike(current.id)} aria-label="Like current track"><Heart size={18} fill={liked.includes(current.id) ? "currentColor" : "none"} /></button>
+            <button className="queue-open-short" onClick={() => setQueueOpen(true)} aria-label={`Open queue with ${upNext.length} songs`}><ListMusic size={18} />{upNext.length > 0 && <i>{upNext.length}</i>}</button>
           </div>
 
           <div className="transport">
@@ -789,12 +872,39 @@ export default function HomePage() {
             <div className="timeline"><span>{formatTime(progress)}</span><Slider value={[Math.min(progress, timelineDuration)]} max={timelineDuration} onValueChange={(value) => setProgress(value[0])} onValueCommit={(value) => { if (audioRef.current) audioRef.current.currentTime = value[0]; }} aria-label="Track progress" /><span>{formatTime(timelineDuration)}</span></div>
           </div>
 
-          <div className="player-extras"><span className={backendReady ? "service-dot online" : "service-dot"} title={backendReady ? "Audio ready" : "Audio offline"} /><Volume2 size={18} /><Slider value={[volume]} onValueChange={(value) => setVolume(value[0])} aria-label="Volume" /><button className="queue-pill" onClick={() => stepTrack(1)}><ListMusic size={15} /> Next up</button></div>
+          <div className="player-extras"><span className={backendReady ? "service-dot online" : "service-dot"} title={backendReady ? "Audio ready" : "Audio offline"} /><Volume2 size={18} /><Slider value={[volume]} onValueChange={(value) => setVolume(value[0])} aria-label="Volume" /><button className="queue-pill" onClick={() => setQueueOpen(true)}><ListMusic size={15} /> Queue{upNext.length > 0 && <b>{upNext.length}</b>}</button></div>
         </footer>
 
         <nav className="mobile-nav" aria-label="Mobile navigation">
           {navItems.map(({ label, icon: Icon }) => <button key={label} onClick={() => navigate(label)} className={activeNav === label ? "active" : ""}><Icon size={20} /><span>{label}</span></button>)}
         </nav>
+        <Sheet open={queueOpen} onOpenChange={setQueueOpen}>
+          <SheetContent className="queue-sheet" side="right">
+            <SheetHeader className="queue-header">
+              <SheetTitle>Play queue</SheetTitle>
+              <SheetDescription>{upNext.length ? `${upNext.length} ${upNext.length === 1 ? "song" : "songs"} waiting` : "Add songs or keep autoplay on."}</SheetDescription>
+            </SheetHeader>
+            <div className="queue-current">
+              <Image src={current.cover} alt="" width={72} height={72} unoptimized />
+              <div><span>Now playing</span><strong>{current.title}</strong><small>{current.artist}</small></div>
+              {playing ? <span className="playing-bars"><i /><i /><i /></span> : <Play size={18} fill="currentColor" />}
+            </div>
+            <div className="queue-content">
+              <div className="queue-section-heading"><div><span>Next in queue</span><small>Use arrows to reorder</small></div>{upNext.length > 0 && <button onClick={() => commitUpNext([])}><Trash2 size={15} /> Clear</button>}</div>
+              {upNext.length === 0 && <div className="queue-empty"><ListMusic /><strong>Your queue is empty</strong><span>Use a song menu and choose Play next or Add to queue.</span></div>}
+              <div className="queue-list">
+                {upNext.map((track, index) => <article className="queue-row" key={track.videoId}>
+                  <button className="queue-track" onClick={() => playFromQueue(track)}><span>{String(index + 1).padStart(2, "0")}</span><Image src={track.cover} alt="" width={48} height={48} unoptimized /><span><strong>{track.title}</strong><small>{track.artist}</small></span></button>
+                  <div className="queue-actions"><button disabled={index === 0} onClick={() => moveInQueue(index, -1)} aria-label={`Move ${track.title} up`}><ArrowUp /></button><button disabled={index === upNext.length - 1} onClick={() => moveInQueue(index, 1)} aria-label={`Move ${track.title} down`}><ArrowDown /></button><button onClick={() => removeFromQueue(track.videoId)} aria-label={`Remove ${track.title} from queue`}><X /></button></div>
+                </article>)}
+              </div>
+              <div className="queue-section-heading autoplay-heading"><div><span>Autoplay</span><small>Based on what you are listening to</small></div><Sparkles size={17} /></div>
+              <div className="autoplay-list">
+                {autoplayTracks.map((track) => <article className="autoplay-row" key={track.videoId}><button onClick={() => selectTrack(track)}><Image src={track.cover} alt="" width={44} height={44} unoptimized /><span><strong>{track.title}</strong><small>{track.artist}</small></span></button><button onClick={() => addToQueue(track)} aria-label={`Add ${track.title} to queue`}><Plus /></button></article>)}
+              </div>
+            </div>
+          </SheetContent>
+        </Sheet>
         <Dialog open={profileOpen} onOpenChange={setProfileOpen}>
           <DialogContent className="profile-dialog">
             <DialogHeader>
