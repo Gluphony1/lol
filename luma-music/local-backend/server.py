@@ -602,7 +602,7 @@ def resolve_audio(video_id: str) -> dict[str, Any]:
 
 
 def audio_source_is_playable(video_id: str) -> bool:
-    """Resolve and read a tiny byte range so fallbacks never return a dead URL."""
+    """Resolve and read a tiny byte range before retrying the selected recording."""
     try:
         resolved = resolve_audio(video_id)
         headers = {
@@ -832,20 +832,24 @@ class LumaHandler(BaseHTTPRequestHandler):
                 resolve_audio(video_id)
                 self.send_json(200, {"ready": True, "videoId": video_id})
                 return
-            if parsed.path == "/fallback":
-                title = (query.get("title") or [""])[0].strip()[:120]
-                artist = (query.get("artist") or [""])[0].strip()[:120]
-                excluded_id = (query.get("exclude") or [""])[0]
-                if not title:
-                    self.send_json(400, {"error": "A song title is required."})
+            if parsed.path == "/refresh":
+                video_id = (query.get("id") or [""])[0]
+                if not VIDEO_ID.fullmatch(video_id):
+                    self.send_json(400, {"error": "Invalid video id."})
                     return
-                excluded = {excluded_id} if VIDEO_ID.fullmatch(excluded_id) else set()
-                alternatives = search_music(f"{title} {artist}".strip(), limit=8, excluded=excluded)
-                playable = next(
-                    (track for track in alternatives if audio_source_is_playable(track["videoId"])),
-                    None,
-                )
-                self.send_json(200, {"track": playable})
+                with _cache_lock:
+                    _cache.pop(video_id, None)
+                playable = False
+                for attempt in range(3):
+                    if audio_source_is_playable(video_id):
+                        playable = True
+                        break
+                    if attempt < 2:
+                        time.sleep(0.35 * (attempt + 1))
+                if not playable:
+                    self.send_json(502, {"error": "The selected recording is temporarily unavailable."})
+                    return
+                self.send_json(200, {"ready": True, "videoId": video_id})
                 return
             if parsed.path == "/lyrics":
                 video_id = (query.get("id") or [""])[0]
@@ -877,20 +881,34 @@ class LumaHandler(BaseHTTPRequestHandler):
 
     def proxy_audio(self, video_id: str) -> None:
         resolved = resolve_audio(video_id)
-        headers = {
-            str(key): str(value)
-            for key, value in resolved["headers"].items()
-            if key.lower() not in {"host", "content-length", "connection"}
-        }
         range_header = self.headers.get("Range")
-        if range_header and len(range_header) <= 100 and re.fullmatch(r"bytes=\d*-\d*", range_header):
-            headers["Range"] = range_header
-        request = urllib.request.Request(resolved["url"], headers=headers)
+
+        def open_upstream(audio: dict[str, Any]) -> Any:
+            headers = {
+                str(key): str(value)
+                for key, value in audio["headers"].items()
+                if key.lower() not in {"host", "content-length", "connection", "range"}
+            }
+            if range_header and len(range_header) <= 100 and re.fullmatch(r"bytes=\d*-\d*", range_header):
+                headers["Range"] = range_header
+            request = urllib.request.Request(audio["url"], headers=headers)
+            return urllib.request.urlopen(request, timeout=30)
 
         try:
-            upstream = urllib.request.urlopen(request, timeout=30)
+            upstream = open_upstream(resolved)
         except urllib.error.HTTPError as error:
-            upstream = error
+            if error.code not in {403, 410}:
+                upstream = error
+            else:
+                with _cache_lock:
+                    _cache.pop(video_id, None)
+                resolved = resolve_audio(video_id)
+                upstream = open_upstream(resolved)
+        except urllib.error.URLError:
+            with _cache_lock:
+                _cache.pop(video_id, None)
+            resolved = resolve_audio(video_id)
+            upstream = open_upstream(resolved)
 
         status = getattr(upstream, "status", None) or upstream.getcode()
         self.send_response(status)

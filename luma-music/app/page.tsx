@@ -387,6 +387,8 @@ export default function HomePage() {
 
   const recoverPlayback = useCallback(async () => {
     const failed = currentRef.current;
+    const audio = audioRef.current;
+    const resumeAt = audio?.currentTime || 0;
     playingRef.current = false;
     setPlaying(false);
     if (recoveryAttemptedRef.current.has(failed.videoId)) {
@@ -398,18 +400,23 @@ export default function HomePage() {
     setPlayerRecovery(true);
     setPlayerError(false);
     try {
-      const params = new URLSearchParams({ title: failed.title, artist: failed.artist, exclude: failed.videoId });
-      const response = await fetch(`${LOCAL_AUDIO_API}/fallback?${params.toString()}`);
-      const payload = await response.json() as { track?: ApiTrack | null };
-      if (!response.ok || !payload.track) throw new Error("No alternate release found");
-      const replacement = mapApiTracks([payload.track])[0];
-      selectTrack(replacement);
-      recoveryAttemptedRef.current.add(replacement.videoId);
+      const response = await fetch(`${LOCAL_AUDIO_API}/refresh?id=${encodeURIComponent(failed.videoId)}`);
+      if (!response.ok || !audio) throw new Error("The selected recording is unavailable");
+      audio.addEventListener("loadedmetadata", () => {
+        if (resumeAt > 0 && Number.isFinite(audio.duration)) {
+          audio.currentTime = Math.min(resumeAt, Math.max(0, audio.duration - 1));
+        }
+      }, { once: true });
+      audio.src = `${LOCAL_AUDIO_API}/stream?id=${encodeURIComponent(failed.videoId)}&retry=${Date.now()}`;
+      audio.load();
+      await audio.play();
+      setPlayerRecovery(false);
+      setPlayerError(false);
     } catch {
       setPlayerRecovery(false);
       setPlayerError(true);
     }
-  }, [selectTrack]);
+  }, []);
 
   const toggleLike = (id: string) => {
     const isLiked = liked.includes(id);
@@ -479,7 +486,7 @@ export default function HomePage() {
     queueMicrotask(() => {
       if (!mounted) return;
       try {
-        const saved = JSON.parse(localStorage.getItem("luma-profile") || "null") as { liked?: string[]; likedTracks?: Track[]; current?: Track; volume?: number; listeningHistory?: ListeningRecord[]; playlists?: Playlist[]; profileName?: string; notificationsRead?: boolean; upNext?: Track[] } | null;
+        const saved = JSON.parse(localStorage.getItem("luma-profile") || "null") as { liked?: string[]; likedTracks?: Track[]; current?: Track; volume?: number; listeningHistory?: ListeningRecord[]; playlists?: Playlist[]; profileName?: string; notificationsRead?: boolean; upNext?: Track[]; suggestions?: Track[] } | null;
         if (saved?.liked?.every((id) => typeof id === "string")) setLiked(saved.liked);
         if (Array.isArray(saved?.likedTracks)) setSavedLikedTracks(saved.likedTracks.map(normalizeSavedTrack));
         if (saved?.current && typeof saved.current.videoId === "string" && typeof saved.current.title === "string") {
@@ -503,6 +510,13 @@ export default function HomePage() {
           const restoredQueue = saved.upNext.filter((track) => track?.videoId && track?.title).map(normalizeSavedTrack).slice(0, 100);
           upNextRef.current = restoredQueue;
           setUpNext(restoredQueue);
+        }
+        if (Array.isArray(saved?.suggestions)) {
+          setTrackSuggestions(saved.suggestions
+            .filter((track) => track?.videoId && track?.title)
+            .map(normalizeSavedTrack)
+            .filter((track, index, items) => items.findIndex((item) => item.videoId === track.videoId) === index)
+            .slice(0, 120));
         }
         if (Array.isArray(saved?.listeningHistory)) {
           setListeningHistory(saved.listeningHistory
@@ -625,7 +639,6 @@ export default function HomePage() {
       setLyricsLoading(true);
       setSuggestionsLoading(true);
       setLyrics([]);
-      setTrackSuggestions([]);
     });
 
     const lyricParams = new URLSearchParams({ id: current.videoId, title: current.title, artist: current.artist, duration: String(Math.round(timelineDuration || 0)) });
@@ -648,12 +661,12 @@ export default function HomePage() {
         const payload = await response.json() as { tracks?: ApiTrack[]; error?: string };
         if (!response.ok) throw new Error(payload.error || "Suggestions unavailable.");
         const mapped = mapApiTracks(payload.tracks || []).filter((track) => track.videoId !== current.videoId).slice(0, 8);
-        setTrackSuggestions(mapped);
+        setTrackSuggestions((previous) => [...previous, ...mapped]
+          .filter((track, index, items) => items.findIndex((item) => item.videoId === track.videoId) === index)
+          .slice(0, 120));
         mapped.slice(0, 3).forEach(warmTrack);
       })
-      .catch(() => {
-        if (!suggestionsController.signal.aborted) setTrackSuggestions([]);
-      })
+      .catch(() => undefined)
       .finally(() => {
         if (!suggestionsController.signal.aborted) setSuggestionsLoading(false);
       });
@@ -680,12 +693,13 @@ export default function HomePage() {
       .then(async (response) => {
         const payload = await response.json() as { tracks?: ApiTrack[]; error?: string };
         if (!response.ok) throw new Error(payload.error || "Recommendations failed.");
-        setRecommendations(mapApiTracks(payload.tracks || []));
+        const incoming = mapApiTracks(payload.tracks || []);
+        setRecommendations((previous) => [...previous, ...incoming]
+          .filter((track, index, items) => items.findIndex((item) => item.videoId === track.videoId) === index)
+          .slice(0, 120));
         setBackendReady(true);
       })
-      .catch(() => {
-        if (!controller.signal.aborted) setRecommendations([]);
-      });
+      .catch(() => undefined);
     return () => controller.abort();
   }, [backendReady, current, listeningHistory, profileReady, query, tasteSeedKey, tasteTrackKey]);
 
@@ -708,8 +722,8 @@ export default function HomePage() {
   useEffect(() => {
     if (!profileReady) return;
     currentRef.current = current;
-    localStorage.setItem("luma-profile", JSON.stringify({ liked, likedTracks, current, volume, listeningHistory, playlists, profileName, notificationsRead, upNext }));
-  }, [current, liked, likedTracks, listeningHistory, notificationsRead, playlists, profileName, profileReady, upNext, volume]);
+    localStorage.setItem("luma-profile", JSON.stringify({ liked, likedTracks, current, volume, listeningHistory, playlists, profileName, notificationsRead, upNext, suggestions: trackSuggestions }));
+  }, [current, liked, likedTracks, listeningHistory, notificationsRead, playlists, profileName, profileReady, trackSuggestions, upNext, volume]);
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
@@ -860,8 +874,8 @@ export default function HomePage() {
                 <aside className="suggestions-card">
                   <div className="lyrics-heading"><div><p className="eyebrow">Up next</p><h2>You might also like</h2></div><Sparkles size={18} /></div>
                   <div className="suggestion-list">
-                    {suggestionsLoading && <div className="suggestion-loading">Tuning your queue…</div>}
-                    {!suggestionsLoading && trackSuggestions.map((track, index) => <button key={track.videoId} className="suggestion-row" onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => selectTrack(track)}><span>{String(index + 1).padStart(2, "0")}</span><Image src={track.cover} alt="" width={48} height={48} unoptimized /><span><strong>{track.title}</strong><small>{track.artist}</small></span><Play size={15} fill="currentColor" /></button>)}
+                    {trackSuggestions.map((track, index) => <button key={track.videoId} className="suggestion-row" onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => selectTrack(track)}><span>{String(index + 1).padStart(2, "0")}</span><Image src={track.cover} alt="" width={48} height={48} unoptimized /><span><strong>{track.title}</strong><small>{track.artist}</small></span><Play size={15} fill="currentColor" /></button>)}
+                    {suggestionsLoading && <div className="suggestion-loading">Adding more suggestions…</div>}
                     {!suggestionsLoading && trackSuggestions.length === 0 && <div className="suggestion-loading">Play another song to refresh suggestions.</div>}
                   </div>
                 </aside>
@@ -956,7 +970,7 @@ export default function HomePage() {
           preload="auto"
           onLoadedMetadata={(event) => setDurationSeconds(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
           onTimeUpdate={(event) => setProgress(event.currentTarget.currentTime)}
-          onPlay={() => { playingRef.current = true; setPlaying(true); }}
+          onPlay={() => { playingRef.current = true; setPlaying(true); setPlayerRecovery(false); setPlayerError(false); }}
           onPause={() => { playingRef.current = false; setPlaying(false); }}
           onEnded={() => repeatEnabled ? selectTrack(currentRef.current) : stepTrack(1)}
           onError={() => void recoverPlayback()}
@@ -965,7 +979,7 @@ export default function HomePage() {
         <footer className="player">
           <div className="now-playing">
             <button className="player-track-open" onClick={() => { setDetailOpen(true); navigate("Home"); }} aria-label={`Open ${current.title}`}><Image src={current.cover} alt={`${current.title} thumbnail`} width={58} height={58} unoptimized /></button>
-            <button className="player-track-copy" onClick={() => { setDetailOpen(true); navigate("Home"); }}><strong>{current.title}</strong><span>{current.artist}</span>{playerRecovery && <small>Trying another release…</small>}{playerError && <small>Audio unavailable — choose another song</small>}</button>
+            <button className="player-track-copy" onClick={() => { setDetailOpen(true); navigate("Home"); }}><strong>{current.title}</strong><span>{current.artist}</span>{playerRecovery && <small>Retrying the same recording…</small>}{playerError && <small>This recording is temporarily unavailable</small>}</button>
             <button className={liked.includes(current.id) ? "liked" : ""} onClick={() => toggleLike(current.id)} aria-label="Like current track"><Heart size={18} fill={liked.includes(current.id) ? "currentColor" : "none"} /></button>
             <button className="queue-open-short" onClick={() => setQueueOpen(true)} aria-label={`Open queue with ${upNext.length} songs`}><ListMusic size={18} />{upNext.length > 0 && <i>{upNext.length}</i>}</button>
           </div>
