@@ -239,6 +239,7 @@ export default function HomePage() {
   const availableTracksRef = useRef<Track[]>(tracks);
   const warmedTracksRef = useRef<Set<string>>(new Set());
   const recoveryAttemptedRef = useRef<Set<string>>(new Set());
+  const autoplayPlayedRef = useRef<Set<string>>(new Set());
   const upNextRef = useRef<Track[]>([]);
   const selectTrackRef = useRef<(track: Track) => void>(() => undefined);
   const playingRef = useRef(false);
@@ -384,13 +385,26 @@ export default function HomePage() {
       selectTrack(next);
       return;
     }
+    if (direction > 0 && autoplayTracks.length) {
+      let available = autoplayTracks.filter((track) => !autoplayPlayedRef.current.has(track.videoId));
+      if (!available.length) {
+        autoplayPlayedRef.current.clear();
+        available = autoplayTracks;
+      }
+      const next = shuffleEnabled
+        ? available[Math.floor(Math.random() * available.length)]
+        : available[0];
+      autoplayPlayedRef.current.add(next.videoId);
+      selectTrack(next);
+      return;
+    }
     const queue = queueRef.current.length ? queueRef.current : tracks;
     const index = queue.findIndex((track) => track.videoId === currentRef.current.videoId);
     const nextIndex = shuffleEnabled && direction > 0
       ? Math.floor(Math.random() * queue.length)
       : ((index < 0 ? 0 : index) + direction + queue.length) % queue.length;
     selectTrack(queue[nextIndex]);
-  }, [commitUpNext, selectTrack, shuffleEnabled]);
+  }, [autoplayTracks, commitUpNext, selectTrack, shuffleEnabled]);
 
   const togglePlayback = useCallback(() => {
     const audio = audioRef.current;
@@ -892,7 +906,7 @@ export default function HomePage() {
                 <aside className="suggestions-card">
                   <div className="lyrics-heading"><div><p className="eyebrow">Up next</p><h2>You might also like</h2></div><Sparkles size={18} /></div>
                   <div className="suggestion-list">
-                    {trackSuggestions.map((track, index) => <button key={track.videoId} className="suggestion-row" onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => selectTrack(track)}><span>{String(index + 1).padStart(2, "0")}</span><Image src={track.cover} alt="" width={48} height={48} unoptimized /><span><strong>{track.title}</strong><small>{track.artist}</small></span><Play size={15} fill="currentColor" /></button>)}
+                    {trackSuggestions.map((track, index) => <button key={track.videoId} className="suggestion-row" onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => { autoplayPlayedRef.current.add(track.videoId); selectTrack(track); }}><span>{String(index + 1).padStart(2, "0")}</span><Image src={track.cover} alt="" width={48} height={48} unoptimized /><span><strong>{track.title}</strong><small>{track.artist}</small></span><Play size={15} fill="currentColor" /></button>)}
                     {suggestionsLoading && <div className="suggestion-loading">Adding more suggestions…</div>}
                     {!suggestionsLoading && trackSuggestions.length === 0 && <div className="suggestion-loading">Play another song to refresh suggestions.</div>}
                   </div>
