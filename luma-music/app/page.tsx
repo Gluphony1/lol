@@ -210,6 +210,7 @@ export default function HomePage() {
   const [lyrics, setLyrics] = useState<LyricLine[]>([]);
   const [lyricsLoading, setLyricsLoading] = useState(false);
   const [lyricsLanguage, setLyricsLanguage] = useState("");
+  const [lyricsFollowEnabled, setLyricsFollowEnabled] = useState(true);
   const [trackSuggestions, setTrackSuggestions] = useState<Track[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [upNext, setUpNext] = useState<Track[]>([]);
@@ -231,6 +232,8 @@ export default function HomePage() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [playerRecovery, setPlayerRecovery] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const lyricsScrollRef = useRef<HTMLDivElement | null>(null);
+  const lyricLineRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const currentRef = useRef<Track>(current);
   const queueRef = useRef<Track[]>(tracks);
   const availableTracksRef = useRef<Track[]>(tracks);
@@ -302,6 +305,20 @@ export default function HomePage() {
     return active;
   }, [lyrics, progress]);
 
+  const centerActiveLyric = useCallback((behavior: ScrollBehavior = "smooth") => {
+    if (activeLyricIndex < 0) return;
+    const container = lyricsScrollRef.current;
+    const line = lyricLineRefs.current[activeLyricIndex];
+    if (!container || !line) return;
+    const top = line.offsetTop - container.clientHeight / 2 + line.clientHeight / 2;
+    container.scrollTo({ top: Math.max(0, top), behavior });
+  }, [activeLyricIndex]);
+
+  useEffect(() => {
+    if (!lyricsFollowEnabled || activeLyricIndex < 0) return;
+    centerActiveLyric("smooth");
+  }, [activeLyricIndex, centerActiveLyric, lyricsFollowEnabled]);
+
   const selectTrack = useCallback((track: Track) => {
     const audio = audioRef.current;
     recoveryAttemptedRef.current.delete(track.videoId);
@@ -311,6 +328,7 @@ export default function HomePage() {
     setDurationSeconds(0);
     setPlayerError(false);
     setPlayerRecovery(false);
+    setLyricsFollowEnabled(true);
     setDetailOpen(true);
     setActiveNav("Home");
     setQuery("");
@@ -864,11 +882,11 @@ export default function HomePage() {
             {!query && activeNav === "Home" && detailOpen && (
               <section className="song-experience" aria-label={`Lyrics and suggestions for ${current.title}`}>
                 <article className="lyrics-card">
-                  <div className="lyrics-heading"><div><p className="eyebrow">Lyrics</p><h2>Sing along</h2></div><span><Mic2 size={15} />{lyricsLanguage ? lyricsLanguage.toUpperCase() : "Live"}</span></div>
-                  <div className="lyrics-scroll" aria-live="polite">
+                  <div className="lyrics-heading"><div><p className="eyebrow">Lyrics</p><h2>Sing along</h2></div><button type="button" className={lyricsFollowEnabled ? "lyrics-live active" : "lyrics-live"} aria-pressed={lyricsFollowEnabled} aria-label={lyricsFollowEnabled ? "Live lyrics follow enabled" : "Resume live lyrics follow"} onClick={() => { setLyricsFollowEnabled(true); centerActiveLyric("smooth"); }}><Mic2 size={15} /><span>Live{lyricsLanguage ? ` · ${lyricsLanguage.toUpperCase()}` : ""}</span></button></div>
+                  <div ref={lyricsScrollRef} className="lyrics-scroll" aria-live="polite" tabIndex={0} onWheel={() => setLyricsFollowEnabled(false)} onTouchMove={() => setLyricsFollowEnabled(false)} onPointerDown={(event) => { if (event.target === event.currentTarget) setLyricsFollowEnabled(false); }} onKeyDown={(event) => { if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) setLyricsFollowEnabled(false); }}>
                     {lyricsLoading && <div className="lyrics-empty">Loading lyrics…</div>}
                     {!lyricsLoading && lyrics.length === 0 && <div className="lyrics-empty"><Mic2 /><strong>Lyrics aren&apos;t available for this release.</strong><span>Try another version of the song.</span></div>}
-                    {!lyricsLoading && lyrics.map((line, index) => <button key={`${line.start}-${index}`} className={index === activeLyricIndex ? "lyric-line active" : "lyric-line"} onClick={() => { if (typeof line.start !== "number") return; if (audioRef.current) audioRef.current.currentTime = line.start; setProgress(line.start); }}>{line.text}</button>)}
+                    {!lyricsLoading && lyrics.map((line, index) => <button ref={(element) => { lyricLineRefs.current[index] = element; }} key={`${line.start}-${index}`} className={index === activeLyricIndex ? "lyric-line active" : "lyric-line"} onClick={() => { if (typeof line.start !== "number") return; if (audioRef.current) audioRef.current.currentTime = line.start; setProgress(line.start); }}>{line.text}</button>)}
                   </div>
                 </article>
                 <aside className="suggestions-card">
