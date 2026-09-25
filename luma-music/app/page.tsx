@@ -9,6 +9,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Compass,
+  Disc3,
   Download,
   Heart,
   Home,
@@ -26,6 +27,7 @@ import {
   SkipForward,
   Sparkles,
   Trash2,
+  UserRound,
   Volume2,
   X,
 } from "lucide-react";
@@ -97,6 +99,21 @@ type ApiTrack = {
   cover: string;
   durationSeconds: number;
   reason?: string | null;
+};
+
+type SearchEntity = {
+  type: "artist" | "album";
+  id: string;
+  title: string;
+  artist: string;
+  cover: string;
+};
+
+type CatalogSection = {
+  id: string;
+  title: string;
+  subtitle: string;
+  tracks: Track[];
 };
 
 type Viewer = {
@@ -204,15 +221,21 @@ export default function HomePage() {
   const [durationSeconds, setDurationSeconds] = useState(0);
   const [viewer, setViewer] = useState<Viewer | null>(null);
   const [remoteResults, setRemoteResults] = useState<Track[]>([]);
+  const [searchArtists, setSearchArtists] = useState<SearchEntity[]>([]);
+  const [searchAlbums, setSearchAlbums] = useState<SearchEntity[]>([]);
   const [recommendations, setRecommendations] = useState<Track[]>([]);
+  const [catalogSections, setCatalogSections] = useState<CatalogSection[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
   const [listeningHistory, setListeningHistory] = useState<ListeningRecord[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [playerRecovery, setPlayerRecovery] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const currentRef = useRef<Track>(current);
   const queueRef = useRef<Track[]>(tracks);
   const availableTracksRef = useRef<Track[]>(tracks);
   const warmedTracksRef = useRef<Set<string>>(new Set());
+  const recoveryAttemptedRef = useRef<Set<string>>(new Set());
   const upNextRef = useRef<Track[]>([]);
   const selectTrackRef = useRef<(track: Track) => void>(() => undefined);
   const playingRef = useRef(false);
@@ -222,11 +245,11 @@ export default function HomePage() {
   const timelineDuration = durationSeconds || fallbackMinutes * 60 + fallbackSeconds;
   const catalog = useMemo(() => {
     const unique = new Map<string, Track>();
-    for (const track of [...tracks, ...savedLikedTracks, ...playlists.flatMap((playlist) => playlist.tracks), ...listeningHistory.map((item) => item.track), ...recommendations, ...remoteResults, ...trackSuggestions, current]) {
+    for (const track of [...tracks, ...savedLikedTracks, ...playlists.flatMap((playlist) => playlist.tracks), ...listeningHistory.map((item) => item.track), ...recommendations, ...remoteResults, ...trackSuggestions, ...catalogSections.flatMap((section) => section.tracks), current]) {
       unique.set(track.videoId, track);
     }
     return [...unique.values()];
-  }, [current, listeningHistory, playlists, recommendations, remoteResults, savedLikedTracks, trackSuggestions]);
+  }, [catalogSections, current, listeningHistory, playlists, recommendations, remoteResults, savedLikedTracks, trackSuggestions]);
   const likedTracks = useMemo(() => catalog.filter((track) => liked.includes(track.id)), [catalog, liked]);
   const selectedPlaylist = useMemo(() => playlists.find((playlist) => playlist.id === selectedPlaylistId) || null, [playlists, selectedPlaylistId]);
   const libraryTracks = useMemo(() => selectedPlaylist ? selectedPlaylist.tracks : likedTracks, [likedTracks, selectedPlaylist]);
@@ -241,15 +264,18 @@ export default function HomePage() {
       const track = catalog.find((item) => item.id === id);
       if (track) add(track.artist, 8);
     }
+    for (const playlist of playlists) {
+      for (const track of playlist.tracks) add(track.artist, 3);
+    }
     add(current.artist, 2);
-    return [...artistScores.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([artist]) => artist);
-  }, [catalog, current.artist, liked, listeningHistory]);
+    return [...artistScores.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([artist]) => artist);
+  }, [catalog, current.artist, liked, listeningHistory, playlists]);
   const tasteSeedKey = tasteSeeds.join("|");
   const tasteSeedTracks = useMemo(() => tasteSeeds.map((artist) => (
     listeningHistory.find((item) => item.track.artist === artist)?.track
     || catalog.find((track) => track.artist === artist && liked.includes(track.id))
     || catalog.find((track) => track.artist === artist)
-  )).filter((track): track is Track => Boolean(track)).slice(0, 3), [catalog, liked, listeningHistory, tasteSeeds]);
+  )).filter((track): track is Track => Boolean(track)).slice(0, 5), [catalog, liked, listeningHistory, tasteSeeds]);
   const tasteTrackKey = JSON.stringify(tasteSeedTracks.map((track) => ({ videoId: track.videoId, artist: track.artist })));
   const results = useMemo(() => {
     const term = query.trim();
@@ -278,11 +304,13 @@ export default function HomePage() {
 
   const selectTrack = useCallback((track: Track) => {
     const audio = audioRef.current;
+    recoveryAttemptedRef.current.delete(track.videoId);
     setCurrent(track);
     currentRef.current = track;
     setProgress(0);
     setDurationSeconds(0);
     setPlayerError(false);
+    setPlayerRecovery(false);
     setDetailOpen(true);
     setActiveNav("Home");
     setQuery("");
@@ -355,6 +383,32 @@ export default function HomePage() {
     }
     if (playingRef.current) audio.pause();
     else void audio.play().catch(() => setPlayerError(true));
+  }, [selectTrack]);
+
+  const recoverPlayback = useCallback(async () => {
+    const failed = currentRef.current;
+    playingRef.current = false;
+    setPlaying(false);
+    if (recoveryAttemptedRef.current.has(failed.videoId)) {
+      setPlayerRecovery(false);
+      setPlayerError(true);
+      return;
+    }
+    recoveryAttemptedRef.current.add(failed.videoId);
+    setPlayerRecovery(true);
+    setPlayerError(false);
+    try {
+      const params = new URLSearchParams({ title: failed.title, artist: failed.artist, exclude: failed.videoId });
+      const response = await fetch(`${LOCAL_AUDIO_API}/fallback?${params.toString()}`);
+      const payload = await response.json() as { track?: ApiTrack | null };
+      if (!response.ok || !payload.track) throw new Error("No alternate release found");
+      const replacement = mapApiTracks([payload.track])[0];
+      selectTrack(replacement);
+      recoveryAttemptedRef.current.add(replacement.videoId);
+    } catch {
+      setPlayerRecovery(false);
+      setPlayerError(true);
+    }
   }, [selectTrack]);
 
   const toggleLike = (id: string) => {
@@ -503,6 +557,8 @@ export default function HomePage() {
     const timer = window.setTimeout(() => {
       if (!term) {
         setRemoteResults([]);
+        setSearchArtists([]);
+        setSearchAlbums([]);
         setSearching(false);
         setSearchError(null);
         return;
@@ -511,14 +567,18 @@ export default function HomePage() {
       setSearchError(null);
       void fetch(`${LOCAL_AUDIO_API}/search?q=${encodeURIComponent(term)}`, { signal: controller.signal })
         .then(async (response) => {
-          const payload = await response.json() as { tracks?: ApiTrack[]; error?: string };
+          const payload = await response.json() as { tracks?: ApiTrack[]; artists?: SearchEntity[]; albums?: SearchEntity[]; error?: string };
           if (!response.ok) throw new Error(payload.error || "Search failed.");
           setRemoteResults(mapApiTracks(payload.tracks || []));
+          setSearchArtists(Array.isArray(payload.artists) ? payload.artists : []);
+          setSearchAlbums(Array.isArray(payload.albums) ? payload.albums : []);
           setBackendReady(true);
         })
         .catch((error: unknown) => {
           if (controller.signal.aborted) return;
           setRemoteResults([]);
+          setSearchArtists([]);
+          setSearchAlbums([]);
           setSearchError(error instanceof Error ? error.message : "Search failed.");
           setBackendReady(false);
         })
@@ -531,6 +591,30 @@ export default function HomePage() {
       window.clearTimeout(timer);
     };
   }, [query]);
+
+  useEffect(() => {
+    if (!profileReady || !backendReady || catalogSections.length) return;
+    const controller = new AbortController();
+    queueMicrotask(() => setCatalogLoading(true));
+    void fetch(`${LOCAL_AUDIO_API}/catalog`, { signal: controller.signal })
+      .then(async (response) => {
+        const payload = await response.json() as { sections?: Array<{ id: string; title: string; subtitle: string; tracks?: ApiTrack[] }> };
+        if (!response.ok) throw new Error("Catalog unavailable");
+        setCatalogSections((payload.sections || []).map((section) => ({
+          id: section.id,
+          title: section.title,
+          subtitle: section.subtitle,
+          tracks: mapApiTracks(section.tracks || []),
+        })).filter((section) => section.tracks.length > 0));
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setCatalogSections([]);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setCatalogLoading(false);
+      });
+    return () => controller.abort();
+  }, [backendReady, catalogSections.length, profileReady]);
 
   useEffect(() => {
     if (!detailOpen || !backendReady) return;
@@ -733,6 +817,16 @@ export default function HomePage() {
               <p>{query ? searching ? "Finding songs and official music releases…" : `${results.length} music results` : activeNav === "Library" ? selectedPlaylist ? `${selectedPlaylist.tracks.length} songs in this playlist.` : "Likes and playlists, together." : activeNav === "Discover" ? "Recommendations shaped by what you play and like." : detailOpen ? `Now playing · ${current.artist}` : "Play something and Luma will learn your taste."}</p>
             </section>
 
+            {query && (searchArtists.length > 0 || searchAlbums.length > 0) && (
+              <section className="search-entities" aria-label="Artists and albums">
+                <div className="section-heading"><div><p className="eyebrow">Best matches</p><h2>Artists & albums</h2></div></div>
+                <div className="entity-grid">
+                  {searchArtists.slice(0, 2).map((entity) => <button className="entity-card artist-entity" key={`artist-${entity.id}`} onClick={() => setQuery(entity.title)}><Image src={entity.cover} alt="" width={72} height={72} unoptimized /><span><small><UserRound size={13} /> Artist</small><strong>{entity.title}</strong><em>Explore songs</em></span><ChevronRight /></button>)}
+                  {searchAlbums.slice(0, 4).map((entity) => <button className="entity-card" key={`album-${entity.id}`} onClick={() => setQuery(`${entity.title} ${entity.artist}`.trim())}><Image src={entity.cover} alt="" width={72} height={72} unoptimized /><span><small><Disc3 size={13} /> Album</small><strong>{entity.title}</strong><em>{entity.artist || "YouTube Music"}</em></span><ChevronRight /></button>)}
+                </div>
+              </section>
+            )}
+
             {!query && activeNav === "Home" && (
               <section className="home-focus" aria-label="Continue listening">
                 <Image src={current.cover} alt={`${current.title} cover`} width={280} height={280} priority unoptimized />
@@ -822,6 +916,21 @@ export default function HomePage() {
               {!searching && results.length === 0 && <div className="empty-state">{activeNav === "Library" && !query ? <Heart /> : <Search />}<h3>{searchError ? "Local audio service unavailable" : activeNav === "Library" && !query ? selectedPlaylist ? "This playlist is empty" : "Your liked songs are empty" : "No songs found"}</h3><p>{searchError || (activeNav === "Library" && !query ? selectedPlaylist ? "Use the playlist button on any song to add it here." : "Like a song and it will appear here." : "Try another song or artist.")}</p><Button onClick={() => activeNav === "Library" && !query ? navigate("Discover") : setQuery("")}>{activeNav === "Library" && !query ? "Discover music" : "Clear search"}</Button></div>}
             </section>
 
+            {!query && activeNav !== "Library" && (
+              <div className="catalog-sections" aria-label="Browse music by style">
+                {catalogLoading && <section className="catalog-loading"><span /><span /><span /><span /></section>}
+                {catalogSections.map((section) => <section className="catalog-row" key={section.id}>
+                  <div className="section-heading"><div><p className="eyebrow">Explore by sound</p><h2>{section.title}</h2><span className="section-subtitle">{section.subtitle}</span></div><button onClick={() => setQuery(section.title)}>See all <ChevronRight size={16} /></button></div>
+                  <div className="catalog-carousel">
+                    {section.tracks.map((track) => <button className="catalog-card" key={`${section.id}-${track.videoId}`} onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => selectTrack(track)}>
+                      <span className="catalog-cover"><Image src={track.cover} alt="" width={220} height={220} unoptimized /><i><Play size={18} fill="currentColor" /></i></span>
+                      <strong>{track.title}</strong><small>{track.artist}</small><em>{track.album}</em>
+                    </button>)}
+                  </div>
+                </section>)}
+              </div>
+            )}
+
             {!query && activeNav === "Home" && (
               <section className="section-block track-section">
                 <div className="section-heading"><div><p className="eyebrow">Recently played</p><h2>Back in rotation</h2></div></div>
@@ -850,13 +959,13 @@ export default function HomePage() {
           onPlay={() => { playingRef.current = true; setPlaying(true); }}
           onPause={() => { playingRef.current = false; setPlaying(false); }}
           onEnded={() => repeatEnabled ? selectTrack(currentRef.current) : stepTrack(1)}
-          onError={() => { playingRef.current = false; setPlaying(false); setPlayerError(true); }}
+          onError={() => void recoverPlayback()}
         />
 
         <footer className="player">
           <div className="now-playing">
             <button className="player-track-open" onClick={() => { setDetailOpen(true); navigate("Home"); }} aria-label={`Open ${current.title}`}><Image src={current.cover} alt={`${current.title} thumbnail`} width={58} height={58} unoptimized /></button>
-            <button className="player-track-copy" onClick={() => { setDetailOpen(true); navigate("Home"); }}><strong>{current.title}</strong><span>{current.artist}</span>{playerError && <small>Audio unavailable — choose another song</small>}</button>
+            <button className="player-track-copy" onClick={() => { setDetailOpen(true); navigate("Home"); }}><strong>{current.title}</strong><span>{current.artist}</span>{playerRecovery && <small>Trying another release…</small>}{playerError && <small>Audio unavailable — choose another song</small>}</button>
             <button className={liked.includes(current.id) ? "liked" : ""} onClick={() => toggleLike(current.id)} aria-label="Like current track"><Heart size={18} fill={liked.includes(current.id) ? "currentColor" : "none"} /></button>
             <button className="queue-open-short" onClick={() => setQueueOpen(true)} aria-label={`Open queue with ${upNext.length} songs`}><ListMusic size={18} />{upNext.length > 0 && <i>{upNext.length}</i>}</button>
           </div>

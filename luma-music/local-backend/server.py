@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import yt_dlp
+from ytmusicapi import YTMusic
 
 
 HOST = "127.0.0.1"
@@ -25,6 +26,8 @@ ALLOWED_ORIGINS = {
 }
 RESOLVE_TTL_SECONDS = 20 * 60
 SEARCH_LIMIT = 18
+MAX_CACHE_ITEMS = 256
+MAX_REQUESTS_PER_MINUTE = 180
 
 NON_MUSIC_TERMS = {
     "interview",
@@ -67,8 +70,20 @@ NOISY_LABELS = re.compile(
 
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _lyrics_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_catalog_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_rate_hits: dict[str, list[float]] = {}
 _cache_lock = threading.Lock()
+_rate_lock = threading.Lock()
 _resolve_locks: dict[str, threading.Lock] = {}
+_ytmusic = YTMusic()
+
+CATALOG_ROWS = (
+    ("rock", "Rock essentials", "Guitars, anthems and alternative classics", "Smells Like Teen Spirit", "Nirvana"),
+    ("pop", "Pop right now", "Big hooks and current pop favorites", "Levitating", "Dua Lipa"),
+    ("latin", "Latin & trap", "Reggaetón, Latin trap and urbano", "MONACO", "Bad Bunny"),
+    ("indie", "Indie & alternative", "Fresh finds beyond the obvious", "Do I Wanna Know?", "Arctic Monkeys"),
+    ("electronic", "Electronic pulse", "Dance, house and electronic energy", "Levels", "Avicii"),
+)
 
 
 def resolve_lock(video_id: str) -> threading.Lock:
@@ -141,6 +156,107 @@ def track_identity(raw_title: str, channel: str) -> tuple[str, str]:
     return title, clean_artist(channel, title_artist)
 
 
+def normalized_text(value: str) -> str:
+    return re.sub(r"[^\wáéíóúüñ]+", " ", value.casefold()).strip()
+
+
+def duration_seconds(value: Any) -> int:
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    parts = str(value or "").split(":")
+    if not parts or any(not part.isdigit() for part in parts):
+        return 0
+    total = 0
+    for part in parts:
+        total = total * 60 + int(part)
+    return total
+
+
+def best_thumbnail(entry: dict[str, Any]) -> str:
+    thumbnails = entry.get("thumbnails") or entry.get("thumbnail") or []
+    if isinstance(thumbnails, list):
+        for image in reversed(thumbnails):
+            if isinstance(image, dict) and image.get("url"):
+                return str(image["url"])
+    video_id = str(entry.get("videoId") or entry.get("id") or "")
+    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+
+
+def music_catalog_track(entry: dict[str, Any], reason: str | None = None, album_only: bool = False) -> dict[str, Any] | None:
+    video_id = str(entry.get("videoId") or entry.get("id") or "")
+    raw_text = f"{entry.get('title') or ''} {entry.get('author') or ''}".casefold()
+    if (
+        not VIDEO_ID.fullmatch(video_id)
+        or entry.get("isAvailable") is False
+        or (album_only and entry.get("videoType") != "MUSIC_VIDEO_TYPE_ATV")
+        or any(term in raw_text for term in NON_MUSIC_TERMS)
+    ):
+        return None
+    artists = entry.get("artists") or []
+    artist = ", ".join(
+        clean_display_text(str(item.get("name") or ""))
+        for item in artists
+        if isinstance(item, dict) and item.get("name")
+    ) or clean_artist(str(entry.get("author") or entry.get("channel") or "YouTube Music"))
+    album_data = entry.get("album")
+    album = str(album_data.get("name") or "Single") if isinstance(album_data, dict) else "Single"
+    title, _ = clean_title(str(entry.get("title") or "Untitled"))
+    return {
+        "videoId": video_id,
+        "title": title,
+        "artist": artist,
+        "album": clean_display_text(album),
+        "cover": best_thumbnail(entry),
+        "durationSeconds": duration_seconds(entry.get("duration_seconds") or entry.get("length") or entry.get("duration")),
+        "reason": reason,
+    }
+
+
+def entity_result(entry: dict[str, Any]) -> dict[str, Any] | None:
+    result_type = str(entry.get("resultType") or "")
+    if result_type not in {"artist", "album", "single"}:
+        return None
+    artists = entry.get("artists") or []
+    artist = ", ".join(
+        clean_display_text(str(item.get("name") or ""))
+        for item in artists
+        if isinstance(item, dict) and item.get("name")
+    )
+    entity_title = str(entry.get("title") or entry.get("artist") or artist or "").strip()
+    if not entity_title:
+        return None
+    return {
+        "type": "album" if result_type in {"album", "single"} else "artist",
+        "id": str(entry.get("browseId") or entry.get("channelId") or entry.get("title") or ""),
+        "title": clean_display_text(entity_title),
+        "artist": artist,
+        "cover": best_thumbnail(entry),
+    }
+
+
+def rank_catalog_track(track: dict[str, Any], query: str, position: int) -> tuple[float, int]:
+    query_text = normalized_text(query)
+    title = normalized_text(str(track.get("title") or ""))
+    artist = normalized_text(str(track.get("artist") or ""))
+    query_words = {word for word in query_text.split() if len(word) > 1}
+    title_words = set(title.split())
+    combined_words = title_words | set(artist.split())
+    score = 0.0
+    if title == query_text:
+        score += 100
+    elif title.startswith(query_text):
+        score += 45
+    if query_words and query_words.issubset(title_words):
+        score += 35
+    elif query_words and query_words.issubset(combined_words):
+        score += 30
+    if query_text and query_text in artist:
+        score += 28
+    # YouTube Music's own ordering is a valuable popularity/relevance signal.
+    # Keep it as the tie-breaker instead of boosting same-named cover singles.
+    return (-score, position)
+
+
 def music_score(entry: dict[str, Any], query: str) -> float:
     raw_title = str(entry.get("title") or "")
     channel = str(entry.get("channel") or entry.get("uploader") or "")
@@ -180,7 +296,7 @@ def music_score(entry: dict[str, Any], query: str) -> float:
     return score
 
 
-def search_music(
+def search_youtube_fallback(
     query: str,
     limit: int = SEARCH_LIMIT,
     excluded: set[str] | None = None,
@@ -236,6 +352,125 @@ def search_music(
     return tracks
 
 
+def search_music(
+    query: str,
+    limit: int = SEARCH_LIMIT,
+    excluded: set[str] | None = None,
+    reason: str | None = None,
+) -> list[dict[str, Any]]:
+    excluded = excluded or set()
+    try:
+        raw_results = _ytmusic.search(query, filter="songs", limit=max(25, limit * 2))
+        ranked: list[tuple[tuple[float, int], dict[str, Any]]] = []
+        for position, entry in enumerate(raw_results):
+            track = music_catalog_track(entry, reason)
+            if not track or track["videoId"] in excluded:
+                continue
+            ranked.append((rank_catalog_track(track, query, position), track))
+        ranked.sort(key=lambda item: item[0])
+        unique: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for _, track in ranked:
+            identity = (normalized_text(track["title"]), normalized_text(track["artist"]))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            unique.append(track)
+            if len(unique) >= limit:
+                break
+        if unique:
+            return unique
+    except Exception as error:
+        print(f"[luma-audio] music catalog search fallback: {error}")
+    return search_youtube_fallback(query, limit, excluded, reason)
+
+
+def search_bundle(query: str) -> dict[str, Any]:
+    tracks = search_music(query)
+    artists: list[dict[str, Any]] = []
+    albums: list[dict[str, Any]] = []
+    try:
+        seen: set[tuple[str, str]] = set()
+        for entry in _ytmusic.search(query, limit=30):
+            entity = entity_result(entry)
+            if not entity:
+                continue
+            identity = (entity["type"], normalized_text(entity["title"]))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            (artists if entity["type"] == "artist" else albums).append(entity)
+    except Exception as error:
+        print(f"[luma-audio] entity search unavailable: {error}")
+    query_key = normalized_text(query)
+    artists.sort(key=lambda item: (normalized_text(item["title"]) != query_key, query_key not in normalized_text(item["title"])))
+    albums.sort(key=lambda item: (normalized_text(item["title"]) != query_key, query_key not in normalized_text(item["title"])))
+    return {"tracks": tracks, "artists": artists[:4], "albums": albums[:6]}
+
+
+def catalog_mix(seed_title: str, seed_artist: str) -> list[dict[str, Any]]:
+    seed_query = f"{seed_title} {seed_artist}"
+    seeds: list[dict[str, Any]] = []
+    try:
+        candidates = [
+            track
+            for entry in _ytmusic.search(seed_query, filter="songs", limit=15)
+            if (track := music_catalog_track(entry))
+        ]
+        title_key = normalized_text(seed_title)
+        artist_key = normalized_text(seed_artist)
+        candidates.sort(key=lambda track: (
+            normalized_text(track["title"]) != title_key,
+            artist_key not in normalized_text(track["artist"]),
+        ))
+        seeds = candidates[:1]
+    except Exception as error:
+        print(f"[luma-audio] catalog seed unavailable: {error}")
+    if not seeds:
+        return []
+    seed = seeds[0]
+    tracks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    artist_counts: dict[str, int] = {}
+    try:
+        mix = _ytmusic.get_watch_playlist(videoId=seed["videoId"], limit=18)
+        for entry in mix.get("tracks") or []:
+            track = music_catalog_track(entry, album_only=True)
+            if not track or track["videoId"] in seen:
+                continue
+            artist_key = normalized_text(track["artist"])
+            if artist_counts.get(artist_key, 0) >= 2:
+                continue
+            seen.add(track["videoId"])
+            artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
+            tracks.append(track)
+            if len(tracks) >= 8:
+                break
+    except Exception as error:
+        print(f"[luma-audio] catalog mix unavailable: {error}")
+    return tracks or search_music(seed_query, limit=8)
+
+
+def catalog_sections() -> dict[str, Any]:
+    cache_key = "default"
+    with _cache_lock:
+        cached = _catalog_cache.get(cache_key)
+        if cached and time.time() - cached[0] < 30 * 60:
+            return cached[1]
+    sections = []
+    for key, title, subtitle, seed_title, seed_artist in CATALOG_ROWS:
+        sections.append({
+            "id": key,
+            "title": title,
+            "subtitle": subtitle,
+            "tracks": catalog_mix(seed_title, seed_artist),
+        })
+    payload = {"sections": sections}
+    with _cache_lock:
+        _catalog_cache[cache_key] = (time.time(), payload)
+    return payload
+
+
 def entry_to_track(entry: dict[str, Any], reason: str | None = None) -> dict[str, Any]:
     video_id = str(entry.get("id") or "")
     duration = entry.get("duration")
@@ -262,29 +497,24 @@ def recommend_music(
 ) -> list[dict[str, Any]]:
     buckets: list[list[dict[str, Any]]] = []
     seen_ids = set(excluded)
-    for seed_id, seed_name in seed_tracks[:3]:
+    for seed_id, seed_name in seed_tracks[:5]:
         reason = f"Because you played {clean_display_text(seed_name)[:80]}"
-        mix_url = f"https://www.youtube.com/watch?v={seed_id}&list=RD{seed_id}"
-        with yt_dlp.YoutubeDL(
-            ydl_options(extract_flat="in_playlist", playlistend=24, noplaylist=False)
-        ) as ydl:
-            mix = ydl.extract_info(mix_url, download=False)
-
         bucket: list[dict[str, Any]] = []
-        for entry in mix.get("entries") or []:
-            video_id = str(entry.get("id") or "")
-            if not VIDEO_ID.fullmatch(video_id) or video_id in seen_ids:
-                continue
-            if music_score(entry, "") < 2:
-                continue
-            track = entry_to_track(entry, reason)
-            seen_ids.add(track["videoId"])
-            bucket.append(track)
+        try:
+            mix = _ytmusic.get_watch_playlist(videoId=seed_id, limit=18)
+            for entry in mix.get("tracks") or []:
+                track = music_catalog_track(entry, reason)
+                if not track or track["videoId"] in seen_ids:
+                    continue
+                seen_ids.add(track["videoId"])
+                bucket.append(track)
+        except Exception as error:
+            print(f"[luma-audio] recommendation mix unavailable: {error}")
         if bucket:
             buckets.append(bucket)
 
     if not buckets:
-        for seed in fallback_seeds[:3]:
+        for seed in fallback_seeds[:5]:
             clean_seed = clean_display_text(seed)[:80]
             tracks_for_seed = search_music(
                 f"{clean_seed} songs",
@@ -298,11 +528,18 @@ def recommend_music(
                 buckets.append(tracks_for_seed)
 
     recommendations: list[dict[str, Any]] = []
+    artist_counts: dict[str, int] = {}
     while buckets and len(recommendations) < SEARCH_LIMIT:
         next_round: list[list[dict[str, Any]]] = []
         for bucket in buckets:
-            if bucket:
-                recommendations.append(bucket.pop(0))
+            while bucket:
+                candidate = bucket.pop(0)
+                artist_key = normalized_text(candidate["artist"])
+                if artist_counts.get(artist_key, 0) >= 3:
+                    continue
+                recommendations.append(candidate)
+                artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
+                break
             if bucket:
                 next_round.append(bucket)
             if len(recommendations) >= SEARCH_LIMIT:
@@ -353,9 +590,36 @@ def resolve_audio(video_id: str) -> dict[str, Any]:
             "contentType": selected.get("mime_type")
             or ("audio/mp4" if selected.get("ext") == "m4a" else "audio/webm"),
         }
+        resolved_url = urllib.parse.urlparse(str(resolved["url"]))
+        if resolved_url.scheme not in {"http", "https"} or not resolved_url.hostname:
+            raise RuntimeError("The audio source returned an invalid URL")
         with _cache_lock:
             _cache[video_id] = (time.time(), resolved)
+            if len(_cache) > MAX_CACHE_ITEMS:
+                oldest = min(_cache, key=lambda key: _cache[key][0])
+                _cache.pop(oldest, None)
         return resolved
+
+
+def audio_source_is_playable(video_id: str) -> bool:
+    """Resolve and read a tiny byte range so fallbacks never return a dead URL."""
+    try:
+        resolved = resolve_audio(video_id)
+        headers = {
+            str(key): str(value)
+            for key, value in resolved["headers"].items()
+            if key.lower() not in {"host", "content-length", "connection", "range"}
+        }
+        headers["Range"] = "bytes=0-1023"
+        request = urllib.request.Request(resolved["url"], headers=headers)
+        with urllib.request.urlopen(request, timeout=15) as response:
+            status = response.getcode()
+            chunk = response.read(1024)
+            return status in {200, 206} and bool(chunk)
+    except (OSError, RuntimeError, urllib.error.URLError, urllib.error.HTTPError):
+        with _cache_lock:
+            _cache.pop(video_id, None)
+        return False
 
 
 def fetch_lrclib_lyrics(title: str, artist: str, duration: int) -> dict[str, Any] | None:
@@ -467,6 +731,18 @@ def fetch_lyrics(video_id: str, title: str = "", artist: str = "", duration: int
     return result
 
 
+def request_allowed(client: str) -> bool:
+    now = time.time()
+    with _rate_lock:
+        recent = [stamp for stamp in _rate_hits.get(client, []) if now - stamp < 60]
+        if len(recent) >= MAX_REQUESTS_PER_MINUTE:
+            _rate_hits[client] = recent
+            return False
+        recent.append(now)
+        _rate_hits[client] = recent
+        return True
+
+
 class LumaHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -484,6 +760,8 @@ class LumaHandler(BaseHTTPRequestHandler):
             "Access-Control-Expose-Headers",
             "Accept-Ranges, Content-Length, Content-Range, Content-Type",
         )
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
 
     def send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -502,6 +780,16 @@ class LumaHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
+        origin = self.headers.get("Origin")
+        if origin and origin not in ALLOWED_ORIGINS:
+            self.send_json(403, {"error": "Origin not allowed."})
+            return
+        if len(self.path) > 2048:
+            self.send_json(414, {"error": "Request URL is too long."})
+            return
+        if not request_allowed(self.client_address[0]):
+            self.send_json(429, {"error": "Too many requests. Try again shortly."})
+            return
         parsed = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed.query)
         try:
@@ -513,7 +801,10 @@ class LumaHandler(BaseHTTPRequestHandler):
                 if not term or len(term) > 160:
                     self.send_json(400, {"error": "Enter a valid search query."})
                     return
-                self.send_json(200, {"tracks": search_music(term)})
+                self.send_json(200, search_bundle(term))
+                return
+            if parsed.path == "/catalog":
+                self.send_json(200, catalog_sections())
                 return
             if parsed.path == "/recommend":
                 raw_seeds = (query.get("seed") or [""])[0]
@@ -541,6 +832,21 @@ class LumaHandler(BaseHTTPRequestHandler):
                 resolve_audio(video_id)
                 self.send_json(200, {"ready": True, "videoId": video_id})
                 return
+            if parsed.path == "/fallback":
+                title = (query.get("title") or [""])[0].strip()[:120]
+                artist = (query.get("artist") or [""])[0].strip()[:120]
+                excluded_id = (query.get("exclude") or [""])[0]
+                if not title:
+                    self.send_json(400, {"error": "A song title is required."})
+                    return
+                excluded = {excluded_id} if VIDEO_ID.fullmatch(excluded_id) else set()
+                alternatives = search_music(f"{title} {artist}".strip(), limit=8, excluded=excluded)
+                playable = next(
+                    (track for track in alternatives if audio_source_is_playable(track["videoId"])),
+                    None,
+                )
+                self.send_json(200, {"track": playable})
+                return
             if parsed.path == "/lyrics":
                 video_id = (query.get("id") or [""])[0]
                 if not VIDEO_ID.fullmatch(video_id):
@@ -548,6 +854,9 @@ class LumaHandler(BaseHTTPRequestHandler):
                     return
                 title = (query.get("title") or [""])[0].strip()
                 artist = (query.get("artist") or [""])[0].strip()
+                if len(title) > 160 or len(artist) > 160:
+                    self.send_json(400, {"error": "Lyrics metadata is too long."})
+                    return
                 try:
                     duration = int((query.get("duration") or ["0"])[0])
                 except ValueError:
@@ -563,7 +872,8 @@ class LumaHandler(BaseHTTPRequestHandler):
                 return
             self.send_json(404, {"error": "Not found."})
         except Exception as error:
-            self.send_json(502, {"error": str(error) or "Audio service failed."})
+            print(f"[luma-audio] request failed: {type(error).__name__}: {error}")
+            self.send_json(502, {"error": "The music service could not complete this request."})
 
     def proxy_audio(self, video_id: str) -> None:
         resolved = resolve_audio(video_id)
@@ -573,7 +883,7 @@ class LumaHandler(BaseHTTPRequestHandler):
             if key.lower() not in {"host", "content-length", "connection"}
         }
         range_header = self.headers.get("Range")
-        if range_header:
+        if range_header and len(range_header) <= 100 and re.fullmatch(r"bytes=\d*-\d*", range_header):
             headers["Range"] = range_header
         request = urllib.request.Request(resolved["url"], headers=headers)
 
