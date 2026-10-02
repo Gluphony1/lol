@@ -3,23 +3,25 @@
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Album,
   ArrowDown,
   ArrowUp,
   Bell,
+  Clock3,
   ChevronLeft,
   ChevronRight,
   Compass,
   Disc3,
   Download,
   Heart,
-  Home,
-  Library,
+  FileAudio,
   ListMusic,
   Mic2,
   MoreHorizontal,
   Pause,
   Play,
   Plus,
+  Radio,
   Repeat2,
   Search,
   Shuffle,
@@ -70,6 +72,7 @@ type Track = {
   duration: string;
   videoId: string;
   reason?: string;
+  localUrl?: string;
 };
 
 type ListeningRecord = {
@@ -181,13 +184,21 @@ const normalizeSavedTrack = (track: Track): Track => {
 };
 
 const navItems = [
-  { label: "Home", icon: Home },
-  { label: "Discover", icon: Compass },
-  { label: "Library", icon: Library },
+  { label: "Browse", icon: Compass },
+  { label: "Songs", icon: ListMusic },
+  { label: "Albums", icon: Album },
+  { label: "Artists", icon: UserRound },
+  { label: "Radio", icon: Radio },
+];
+
+const myMusicItems = [
+  { label: "Recently Played", icon: Clock3 },
+  { label: "Favorite Songs", icon: Heart },
+  { label: "Local Files", icon: FileAudio },
 ];
 
 export default function HomePage() {
-  const [activeNav, setActiveNav] = useState("Home");
+  const [activeNav, setActiveNav] = useState("Browse");
   const [query, setQuery] = useState("");
   const [current, setCurrent] = useState<Track>(tracks[0]);
   const [playing, setPlaying] = useState(false);
@@ -225,6 +236,7 @@ export default function HomePage() {
   const [searchArtists, setSearchArtists] = useState<SearchEntity[]>([]);
   const [searchAlbums, setSearchAlbums] = useState<SearchEntity[]>([]);
   const [recommendations, setRecommendations] = useState<Track[]>([]);
+  const [localFiles, setLocalFiles] = useState<Track[]>([]);
   const [catalogSections, setCatalogSections] = useState<CatalogSection[]>([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [listeningHistory, setListeningHistory] = useState<ListeningRecord[]>([]);
@@ -249,17 +261,21 @@ export default function HomePage() {
   const timelineDuration = durationSeconds || fallbackMinutes * 60 + fallbackSeconds;
   const catalog = useMemo(() => {
     const unique = new Map<string, Track>();
-    for (const track of [...tracks, ...savedLikedTracks, ...playlists.flatMap((playlist) => playlist.tracks), ...listeningHistory.map((item) => item.track), ...recommendations, ...remoteResults, ...trackSuggestions, ...catalogSections.flatMap((section) => section.tracks), current]) {
+    for (const track of [...tracks, ...localFiles, ...savedLikedTracks, ...playlists.flatMap((playlist) => playlist.tracks), ...listeningHistory.map((item) => item.track), ...recommendations, ...remoteResults, ...trackSuggestions, ...catalogSections.flatMap((section) => section.tracks), current]) {
       unique.set(track.videoId, track);
     }
     return [...unique.values()];
-  }, [catalogSections, current, listeningHistory, playlists, recommendations, remoteResults, savedLikedTracks, trackSuggestions]);
+  }, [catalogSections, current, listeningHistory, localFiles, playlists, recommendations, remoteResults, savedLikedTracks, trackSuggestions]);
   const likedTracks = useMemo(() => catalog.filter((track) => liked.includes(track.id)), [catalog, liked]);
   const selectedPlaylist = useMemo(() => playlists.find((playlist) => playlist.id === selectedPlaylistId) || null, [playlists, selectedPlaylistId]);
   const libraryTracks = useMemo(() => selectedPlaylist ? selectedPlaylist.tracks : likedTracks, [likedTracks, selectedPlaylist]);
   const tasteSeeds = useMemo(() => {
     const artistScores = new Map<string, number>();
-    const add = (artist: string, score: number) => artistScores.set(artist, (artistScores.get(artist) || 0) + score);
+    const add = (artist: string, score: number) => {
+      const cleanArtist = artist.trim();
+      if (!cleanArtist || cleanArtist.length > 48) return;
+      artistScores.set(cleanArtist, (artistScores.get(cleanArtist) || 0) + score);
+    };
     for (const [index, item] of listeningHistory.entries()) {
       const recency = Math.max(0, 4 - index * 0.35);
       add(item.track.artist, item.plays * 3 + recency);
@@ -284,11 +300,29 @@ export default function HomePage() {
   const results = useMemo(() => {
     const term = query.trim();
     if (term) return remoteResults;
-    if (activeNav === "Library") return libraryTracks;
+    if (activeNav === "Favorite Songs" || activeNav === "Library") return libraryTracks;
+    if (activeNav === "Recently Played") return listeningHistory.map((item) => item.track);
+    if (activeNav === "Local Files") return localFiles;
     return recommendations.length ? recommendations : tracks;
-  }, [activeNav, libraryTracks, query, recommendations, remoteResults]);
+  }, [activeNav, libraryTracks, listeningHistory, localFiles, query, recommendations, remoteResults]);
   const recentTracks = listeningHistory.length ? listeningHistory.map((item) => item.track) : tracks;
   const topArtist = tasteSeeds[0] || current.artist;
+  const albumGroups = useMemo(() => {
+    const unique = new Map<string, Track>();
+    for (const track of catalog) {
+      const key = `${track.album || track.title}|${track.artist}`.toLowerCase();
+      if (!unique.has(key)) unique.set(key, track);
+    }
+    return [...unique.values()];
+  }, [catalog]);
+  const popularArtists = useMemo(() => {
+    const unique = new Map<string, Track>();
+    for (const track of [...recentTracks, ...recommendations, ...catalogSections.flatMap((section) => section.tracks)]) {
+      const key = track.artist.trim().toLowerCase();
+      if (key && track.artist.length <= 48 && track.artist.toLowerCase() !== track.title.toLowerCase() && !unique.has(key)) unique.set(key, track);
+    }
+    return [...unique.values()].slice(0, 12);
+  }, [catalogSections, recentTracks, recommendations]);
   const autoplayTracks = useMemo(() => {
     const queuedIds = new Set([current.videoId, ...upNext.map((track) => track.videoId)]);
     const unique = new Map<string, Track>();
@@ -331,7 +365,7 @@ export default function HomePage() {
     setPlayerRecovery(false);
     setLyricsFollowEnabled(true);
     setDetailOpen(true);
-    setActiveNav("Home");
+    setActiveNav("Browse");
     setQuery("");
     setListeningHistory((items) => {
       const existing = items.find((item) => item.track.videoId === track.videoId);
@@ -341,7 +375,7 @@ export default function HomePage() {
       return next.sort((a, b) => b.lastPlayed - a.lastPlayed).slice(0, 60);
     });
     if (!audio) return;
-    audio.src = `${LOCAL_AUDIO_API}/stream?id=${encodeURIComponent(track.videoId)}`;
+    audio.src = track.localUrl || `${LOCAL_AUDIO_API}/stream?id=${encodeURIComponent(track.videoId)}`;
     audio.load();
     void audio.play().catch(() => setPlayerError(true));
   }, []);
@@ -423,6 +457,11 @@ export default function HomePage() {
     const resumeAt = audio?.currentTime || 0;
     playingRef.current = false;
     setPlaying(false);
+    if (failed.localUrl) {
+      setPlayerRecovery(false);
+      setPlayerError(true);
+      return;
+    }
     if (recoveryAttemptedRef.current.has(failed.videoId)) {
       setPlayerRecovery(false);
       setPlayerError(true);
@@ -461,6 +500,7 @@ export default function HomePage() {
   };
 
   const warmTrack = useCallback((track: Track) => {
+    if (track.localUrl) return;
     if (warmedTracksRef.current.has(track.videoId)) return;
     warmedTracksRef.current.add(track.videoId);
     void fetch(`${LOCAL_AUDIO_API}/prepare?id=${encodeURIComponent(track.videoId)}`)
@@ -504,7 +544,32 @@ export default function HomePage() {
   const navigate = (destination: string) => {
     setQuery("");
     setActiveNav(destination);
-    if (destination === "Library") setSelectedPlaylistId(null);
+    if (destination === "Library" || destination === "Favorite Songs") setSelectedPlaylistId(null);
+  };
+
+  const playShuffle = () => {
+    const pool = results.length ? results : catalog;
+    if (!pool.length) return;
+    setShuffleEnabled(true);
+    selectTrack(pool[Math.floor(Math.random() * pool.length)]);
+  };
+
+  const importLocalFiles = (files: FileList | null) => {
+    if (!files) return;
+    const imported = Array.from(files).filter((file) => file.type.startsWith("audio/")).map((file, index): Track => ({
+      id: `local-${file.name}-${file.lastModified}`,
+      videoId: `local-${file.name}-${file.lastModified}`,
+      title: file.name.replace(/\.[^.]+$/, ""),
+      artist: "Local file",
+      album: "On this device",
+      cover: "/icon-192.png",
+      color: resultColors[index % resultColors.length],
+      duration: "0:00",
+      localUrl: URL.createObjectURL(file),
+    }));
+    setLocalFiles((previous) => [...previous, ...imported].filter((track, index, items) => items.findIndex((item) => item.id === track.id) === index));
+    setActiveNav("Local Files");
+    setQuery("");
   };
 
   const formatTime = durationLabel;
@@ -754,7 +819,9 @@ export default function HomePage() {
   useEffect(() => {
     if (!profileReady) return;
     currentRef.current = current;
-    localStorage.setItem("luma-profile", JSON.stringify({ liked, likedTracks, current, volume, listeningHistory, playlists, profileName, notificationsRead, upNext, suggestions: trackSuggestions }));
+    const persistentCurrent = current.localUrl ? tracks[0] : current;
+    const persistentHistory = listeningHistory.filter((item) => !item.track.localUrl);
+    localStorage.setItem("luma-profile", JSON.stringify({ liked, likedTracks: likedTracks.filter((track) => !track.localUrl), current: persistentCurrent, volume, listeningHistory: persistentHistory, playlists: playlists.map((playlist) => ({ ...playlist, tracks: playlist.tracks.filter((track) => !track.localUrl) })), profileName, notificationsRead, upNext: upNext.filter((track) => !track.localUrl), suggestions: trackSuggestions }));
   }, [current, liked, likedTracks, listeningHistory, notificationsRead, playlists, profileName, profileReady, trackSuggestions, upNext, volume]);
 
   useEffect(() => {
@@ -820,9 +887,11 @@ export default function HomePage() {
           </nav>
 
           <div className="library-block">
-            <div className="side-label"><span>Your collection</span><button onClick={() => setPlaylistOpen(true)} aria-label="Create playlist"><Plus size={15} /></button></div>
-            <button className="collection-item" onClick={openLikedSongs}><span className="liked-tile"><Heart size={15} fill="currentColor" /></span><span>Liked songs<small>{likedTracks.length} tracks</small></span></button>
-            <button className="collection-item" onClick={() => navigate("Discover")}><span className="mix-tile"><Sparkles size={15} /></span><span>Made for you<small>{recommendations.length || "Daily"} picks</small></span></button>
+            <div className="side-label"><span>My music</span><button onClick={() => setPlaylistOpen(true)} aria-label="Create playlist"><Plus size={15} /></button></div>
+            <nav className="secondary-nav" aria-label="My music">
+              {myMusicItems.map(({ label, icon: Icon }) => <button key={label} className={activeNav === label ? "side-link active" : "side-link"} onClick={() => navigate(label)}><Icon size={17} /><span>{label}</span>{label === "Favorite Songs" && <small>{likedTracks.length}</small>}</button>)}
+            </nav>
+            <div className="side-label playlist-label"><span>Playlists</span></div>
             {playlists.map((playlist) => <button className="collection-item" key={playlist.id} onClick={() => openPlaylist(playlist.id)}><span className="playlist-tile"><ListMusic size={15} /></span><span>{playlist.name}<small>{playlist.tracks.length} tracks</small></span></button>)}
           </div>
 
@@ -841,6 +910,11 @@ export default function HomePage() {
               <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search songs, artists or albums" aria-label="Search music" />
               <kbd>⌘ K</kbd>
             </label>
+            <nav className="browse-tabs" aria-label="Browse shortcuts">
+              <button onClick={() => navigate("Albums")}>New Releases</button>
+              <button onClick={() => navigate("Browse")}>New Feed</button>
+              <button onClick={playShuffle}><Shuffle size={14} /> Shuffle Play</button>
+            </nav>
             <div className="top-actions">
               <Button className="upgrade-button" onClick={handleInstall}><Download /> Install app</Button>
               <Popover>
@@ -859,8 +933,8 @@ export default function HomePage() {
 
           <div className="scroll-area">
             <section className="intro-row">
-              <div><p className="eyebrow">Your music</p><h1>{query ? "Songs" : activeNav === "Library" ? selectedPlaylist?.name || "Your library" : activeNav === "Discover" ? "Made for you" : detailOpen ? current.title : `Welcome, ${viewerName.split(" ")[0]}.`}</h1></div>
-              <p>{query ? searching ? "Finding songs and official music releases…" : `${results.length} music results` : activeNav === "Library" ? selectedPlaylist ? `${selectedPlaylist.tracks.length} songs in this playlist.` : "Likes and playlists, together." : activeNav === "Discover" ? "Recommendations shaped by what you play and like." : detailOpen ? `Now playing · ${current.artist}` : "Play something and Luma will learn your taste."}</p>
+              <div><p className="eyebrow">Luma music</p><h1>{query ? "Search results" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Browse" && detailOpen ? current.title : activeNav}</h1></div>
+              <p>{query ? searching ? "Finding songs and official music releases…" : `${results.length} music results` : activeNav === "Browse" ? "Music, albums and artists tuned to what you actually play." : activeNav === "Local Files" ? "Music from this device stays private in your browser." : "Explore your music without leaving the flow."}</p>
             </section>
 
             {query && (searchArtists.length > 0 || searchAlbums.length > 0) && (
@@ -873,7 +947,7 @@ export default function HomePage() {
               </section>
             )}
 
-            {!query && activeNav === "Home" && (
+            {!query && activeNav === "Browse" && (
               <section className="home-focus" aria-label="Continue listening">
                 <Image src={current.cover} alt={`${current.title} cover`} width={280} height={280} priority unoptimized />
                 <div className="home-focus-copy">
@@ -893,7 +967,16 @@ export default function HomePage() {
               </section>
             )}
 
-            {!query && activeNav === "Home" && detailOpen && (
+            {!query && activeNav === "Browse" && (
+              <section className="popular-artists section-block" aria-label="Popular artists">
+                <div className="section-heading"><div><p className="eyebrow">Artists for you</p><h2>Popular artists</h2></div><button onClick={() => navigate("Artists")}>See all <ChevronRight size={16} /></button></div>
+                <div className="artist-carousel">
+                  {popularArtists.slice(0, 8).map((track) => <button key={track.artist} className="artist-bubble" onClick={() => { setQuery(track.artist); setActiveNav("Artists"); }}><Image src={track.cover} alt="" width={112} height={112} unoptimized /><strong>{track.artist}</strong><span>Artist</span></button>)}
+                </div>
+              </section>
+            )}
+
+            {!query && activeNav === "Browse" && detailOpen && (
               <section className="song-experience" aria-label={`Lyrics and suggestions for ${current.title}`}>
                 <article className="lyrics-card">
                   <div className="lyrics-heading"><div><p className="eyebrow">Lyrics</p><h2>Sing along</h2></div><button type="button" className={lyricsFollowEnabled ? "lyrics-live active" : "lyrics-live"} aria-pressed={lyricsFollowEnabled} aria-label={lyricsFollowEnabled ? "Live lyrics follow enabled" : "Resume live lyrics follow"} onClick={() => { setLyricsFollowEnabled(true); centerActiveLyric("smooth"); }}><Mic2 size={15} /><span>Live{lyricsLanguage ? ` · ${lyricsLanguage.toUpperCase()}` : ""}</span></button></div>
@@ -914,11 +997,11 @@ export default function HomePage() {
               </section>
             )}
 
-            {!query && activeNav === "Discover" && (
+            {!query && activeNav === "Songs" && (
               <div className="taste-strip"><Sparkles size={17} /><span>Recommendations tuned from</span>{tasteSeeds.map((artist) => <button key={artist} onClick={() => setQuery(artist)}>{artist}</button>)}</div>
             )}
 
-            {!query && activeNav === "Library" && (
+            {!query && (activeNav === "Library" || activeNav === "Favorite Songs") && (
               <div className="library-shelf">
                 <button className={!selectedPlaylist ? "library-summary active" : "library-summary"} onClick={openLikedSongs}><span className="liked-tile"><Heart size={20} fill="currentColor" /></span><div><strong>Liked songs</strong><p>{likedTracks.length} saved {likedTracks.length === 1 ? "song" : "songs"}</p></div></button>
                 {playlists.map((playlist) => <button className={selectedPlaylistId === playlist.id ? "library-summary active" : "library-summary"} key={playlist.id} onClick={() => openPlaylist(playlist.id)}><span className="playlist-tile"><ListMusic size={20} /></span><div><strong>{playlist.name}</strong><p>{playlist.tracks.length} {playlist.tracks.length === 1 ? "song" : "songs"}</p></div></button>)}
@@ -926,10 +1009,45 @@ export default function HomePage() {
               </div>
             )}
 
-            <section className="section-block">
-              <div className="section-heading"><div><p className="eyebrow">{query ? "Music only" : activeNav === "Library" ? "Inside this collection" : recommendations.length ? "Based on your listening" : "Start your profile"}</p><h2>{query ? "Songs" : activeNav === "Library" ? selectedPlaylist?.name || "Liked songs" : activeNav === "Discover" ? "Your daily mix" : "Picked for you"}</h2></div>{!query && activeNav === "Home" && <button onClick={() => navigate("Discover")}>View all <ChevronRight size={16} /></button>}</div>
-              <div className="album-grid">
-                {results.slice(0, query || activeNav !== "Home" ? 18 : 6).map((track) => (
+            {!query && activeNav === "Local Files" && (
+              <section className="local-import">
+                <FileAudio size={28} />
+                <div><strong>Play music stored on this device</strong><p>MP3, M4A, WAV, FLAC and other browser-supported audio. Nothing is uploaded.</p></div>
+                <label><input type="file" accept="audio/*" multiple onChange={(event) => importLocalFiles(event.target.files)} /><span><Plus size={16} /> Add local music</span></label>
+              </section>
+            )}
+
+            {!query && activeNav === "Albums" && (
+              <section className="section-block collection-view">
+                <div className="section-heading"><div><p className="eyebrow">Fresh from your catalog</p><h2>Albums & releases</h2></div></div>
+                <div className="album-carousel roomy">
+                  {albumGroups.slice(0, 30).map((track) => <button className="catalog-card" key={`${track.album}-${track.artist}`} onClick={() => setQuery(`${track.album} ${track.artist}`)}><span className="catalog-cover"><Image src={track.cover} alt="" width={240} height={240} unoptimized /><i><Search size={18} /></i></span><strong>{track.album || track.title}</strong><small>{track.artist}</small><em>Album</em></button>)}
+                </div>
+              </section>
+            )}
+
+            {!query && activeNav === "Artists" && (
+              <section className="section-block collection-view">
+                <div className="section-heading"><div><p className="eyebrow">Based on your listening</p><h2>Artists to explore</h2></div></div>
+                <div className="artist-grid">
+                  {popularArtists.map((track) => <button key={track.artist} className="artist-bubble" onClick={() => setQuery(track.artist)}><Image src={track.cover} alt="" width={150} height={150} unoptimized /><strong>{track.artist}</strong><span>View songs</span></button>)}
+                </div>
+              </section>
+            )}
+
+            {!query && activeNav === "Radio" && (
+              <section className="section-block collection-view">
+                <div className="section-heading"><div><p className="eyebrow">Endless listening</p><h2>Radio stations for you</h2></div></div>
+                <div className="radio-grid">
+                  {catalogSections.slice(0, 6).map((section, index) => <button key={section.id} className="radio-card" onClick={() => { const station = section.tracks[Math.floor(Math.random() * section.tracks.length)]; if (station) { setShuffleEnabled(true); selectTrack(station); } }}><span className="radio-art"><Image src={section.tracks[0]?.cover || current.cover} alt="" width={180} height={180} unoptimized /><Radio /></span><span><small>STATION {String(index + 1).padStart(2, "0")}</small><strong>{section.title} Radio</strong><em>{section.subtitle}</em></span></button>)}
+                </div>
+              </section>
+            )}
+
+            {(query || !["Albums", "Artists", "Radio"].includes(activeNav)) && <section className="section-block">
+              <div className="section-heading"><div><p className="eyebrow">{query ? "Music only" : activeNav === "Library" || activeNav === "Favorite Songs" ? "Inside this collection" : activeNav === "Recently Played" ? "Your listening history" : activeNav === "Local Files" ? "On this device" : recommendations.length ? "Based on your listening" : "Start your profile"}</p><h2>{query ? "Songs" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Recently Played" ? "Recently played" : activeNav === "Local Files" ? "Local songs" : activeNav === "Songs" ? "Songs picked for you" : "Picked for you"}</h2></div>{!query && activeNav === "Browse" && <button onClick={() => navigate("Songs")}>View all <ChevronRight size={16} /></button>}</div>
+              <div className={query ? "album-grid search-grid" : "album-carousel"}>
+                {results.slice(0, query ? 18 : activeNav === "Browse" ? 12 : 30).map((track) => (
                   <article className={current.videoId === track.videoId ? "album-card selected" : "album-card"} key={track.id}>
                     <button className="cover-button" onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => selectTrack(track)} aria-label={`Play ${track.title} by ${track.artist}`}>
                       <Image src={track.cover} alt="" width={360} height={360} unoptimized />
@@ -959,10 +1077,10 @@ export default function HomePage() {
                 ))}
               </div>
               {searching && <div className="empty-state"><Search /><h3>Finding songs…</h3><p>Filtering out interviews, reactions and unrelated videos.</p></div>}
-              {!searching && results.length === 0 && <div className="empty-state">{activeNav === "Library" && !query ? <Heart /> : <Search />}<h3>{searchError ? "Local audio service unavailable" : activeNav === "Library" && !query ? selectedPlaylist ? "This playlist is empty" : "Your liked songs are empty" : "No songs found"}</h3><p>{searchError || (activeNav === "Library" && !query ? selectedPlaylist ? "Use the playlist button on any song to add it here." : "Like a song and it will appear here." : "Try another song or artist.")}</p><Button onClick={() => activeNav === "Library" && !query ? navigate("Discover") : setQuery("")}>{activeNav === "Library" && !query ? "Discover music" : "Clear search"}</Button></div>}
-            </section>
+              {!searching && results.length === 0 && <div className="empty-state">{(activeNav === "Library" || activeNav === "Favorite Songs") && !query ? <Heart /> : activeNav === "Local Files" ? <FileAudio /> : <Search />}<h3>{searchError ? "Local audio service unavailable" : activeNav === "Local Files" ? "No local music yet" : (activeNav === "Library" || activeNav === "Favorite Songs") && !query ? selectedPlaylist ? "This playlist is empty" : "Your favorite songs are empty" : "No songs found"}</h3><p>{searchError || (activeNav === "Local Files" ? "Add audio files from this device to play them in Luma." : (activeNav === "Library" || activeNav === "Favorite Songs") && !query ? selectedPlaylist ? "Use the playlist button on any song to add it here." : "Like a song and it will appear here." : "Try another song or artist.")}</p><Button onClick={() => (activeNav === "Library" || activeNav === "Favorite Songs") && !query ? navigate("Browse") : setQuery("")}>{(activeNav === "Library" || activeNav === "Favorite Songs") && !query ? "Browse music" : "Clear search"}</Button></div>}
+            </section>}
 
-            {!query && activeNav !== "Library" && (
+            {!query && ["Browse", "Songs"].includes(activeNav) && (
               <div className="catalog-sections" aria-label="Browse music by style">
                 {catalogLoading && <section className="catalog-loading"><span /><span /><span /><span /></section>}
                 {catalogSections.map((section) => <section className="catalog-row" key={section.id}>
@@ -977,7 +1095,7 @@ export default function HomePage() {
               </div>
             )}
 
-            {!query && activeNav === "Home" && (
+            {!query && activeNav === "Browse" && (
               <section className="section-block track-section">
                 <div className="section-heading"><div><p className="eyebrow">Recently played</p><h2>Back in rotation</h2></div></div>
                 <div className="track-list">
@@ -1010,8 +1128,8 @@ export default function HomePage() {
 
         <footer className="player">
           <div className="now-playing">
-            <button className="player-track-open" onClick={() => { setDetailOpen(true); navigate("Home"); }} aria-label={`Open ${current.title}`}><Image src={current.cover} alt={`${current.title} thumbnail`} width={58} height={58} unoptimized /></button>
-            <button className="player-track-copy" onClick={() => { setDetailOpen(true); navigate("Home"); }}><strong>{current.title}</strong><span>{current.artist}</span>{playerRecovery && <small>Retrying the same recording…</small>}{playerError && <small>This recording is temporarily unavailable</small>}</button>
+            <button className="player-track-open" onClick={() => { setDetailOpen(true); navigate("Browse"); }} aria-label={`Open ${current.title}`}><Image src={current.cover} alt={`${current.title} thumbnail`} width={58} height={58} unoptimized /></button>
+            <button className="player-track-copy" onClick={() => { setDetailOpen(true); navigate("Browse"); }}><strong>{current.title}</strong><span>{current.artist}</span>{playerRecovery && <small>Retrying the same recording…</small>}{playerError && <small>This recording is temporarily unavailable</small>}</button>
             <button className={liked.includes(current.id) ? "liked" : ""} onClick={() => toggleLike(current.id)} aria-label="Like current track"><Heart size={18} fill={liked.includes(current.id) ? "currentColor" : "none"} /></button>
             <button className="queue-open-short" onClick={() => setQueueOpen(true)} aria-label={`Open queue with ${upNext.length} songs`}><ListMusic size={18} />{upNext.length > 0 && <i>{upNext.length}</i>}</button>
           </div>
@@ -1031,7 +1149,7 @@ export default function HomePage() {
         </footer>
 
         <nav className="mobile-nav" aria-label="Mobile navigation">
-          {navItems.map(({ label, icon: Icon }) => <button key={label} onClick={() => navigate(label)} className={activeNav === label ? "active" : ""}><Icon size={20} /><span>{label}</span></button>)}
+          {[navItems[0], navItems[1], myMusicItems[1]].map(({ label, icon: Icon }) => <button key={label} onClick={() => navigate(label)} className={activeNav === label ? "active" : ""}><Icon size={20} /><span>{label}</span></button>)}
         </nav>
         <Sheet open={queueOpen} onOpenChange={setQueueOpen}>
           <SheetContent className="queue-sheet" side="right">
@@ -1070,7 +1188,7 @@ export default function HomePage() {
             <label className="profile-name-field"><span>Display name</span><input value={profileDraft} maxLength={60} onChange={(event) => setProfileDraft(event.target.value)} placeholder="Your name" /></label>
             <div className="profile-stats"><div><strong>{likedTracks.length}</strong><span>Liked</span></div><div><strong>{listeningHistory.length}</strong><span>Played</span></div><div><strong>{topArtist}</strong><span>Top artist</span></div></div>
             <div className="profile-status"><span className={backendReady ? "service-dot online" : "service-dot"} />{backendReady ? "Local audio service connected" : "Local audio service offline"}</div>
-            <div className="profile-actions"><Button onClick={() => { setProfileName(profileDraft.trim().slice(0, 60)); setProfileOpen(false); }}>Save profile</Button><Button variant="secondary" onClick={() => { navigate("Library"); setProfileOpen(false); }}>Open library</Button>{viewer && <a href="/signout-with-chatgpt?return_to=/" target="_top">Sign out</a>}</div>
+            <div className="profile-actions"><Button onClick={() => { setProfileName(profileDraft.trim().slice(0, 60)); setProfileOpen(false); }}>Save profile</Button><Button variant="secondary" onClick={() => { navigate("Favorite Songs"); setProfileOpen(false); }}>Open library</Button>{viewer && <a href="/signout-with-chatgpt?return_to=/" target="_top">Sign out</a>}</div>
           </DialogContent>
         </Dialog>
         <Dialog open={playlistOpen} onOpenChange={setPlaylistOpen}>
