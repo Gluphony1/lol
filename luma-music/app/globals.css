@@ -104,6 +104,7 @@ button:focus-visible, input:focus-visible, [data-slot="slider"]:focus-visible { 
 .taste-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: -4px 0 8px; color: #8f8a9d; font-size: .78rem; }.taste-strip > svg { color: #a78bfa; }.taste-strip button { padding: 7px 11px; border: 1px solid #8b5cf62b; border-radius: 999px; background: #8b5cf612; color: #cfc5f7; font-size: .75rem; cursor: pointer; }.taste-strip button:hover { background: #8b5cf626; }
 .library-summary { display: flex; align-items: center; gap: 14px; width: fit-content; margin-bottom: 4px; padding: 14px 18px; border: 1px solid #ffffff0f; border-radius: 16px; background: #14121e; }.library-summary .liked-tile { width: 44px; height: 44px; }.library-summary strong { font-size: .9rem; }.library-summary p { margin: 4px 0 0; color: #827e8f; font-size: .74rem; }
 .section-block { margin-top: 34px; }.section-heading { margin-bottom: 18px; }.section-heading h2 { font-size: clamp(1.4rem, 2vw, 1.9rem); }
+.section-note { color: #77716d; font-size: .76rem; }
 .album-grid { grid-template-columns: repeat(6, minmax(132px, 1fr)); gap: 20px 16px; }
 .cover-button { border-color: #ffffff0d; border-radius: 14px; background: #161421; box-shadow: 0 10px 28px #0002; }
 .cover-button::after { content: ""; position: absolute; inset: 50% 0 0; pointer-events: none; background: linear-gradient(transparent, #07060b99); }

@@ -172,6 +172,14 @@ const artworkUrl = (cover: string) => {
 };
 
 const durationLabel = (seconds: number) => `${Math.floor(seconds / 60)}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`;
+const discoveryScore = (value: string, salt: string) => {
+  let hash = 2166136261;
+  for (const character of `${salt}|${value}`) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+};
 const mapApiTracks = (items: ApiTrack[]) => items.map((track, index): Track => ({
   id: track.videoId,
   videoId: track.videoId,
@@ -264,6 +272,7 @@ export default function HomePage() {
   const [localFiles, setLocalFiles] = useState<Track[]>([]);
   const [catalogSections, setCatalogSections] = useState<CatalogSection[]>([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
+  const [discoverySalt, setDiscoverySalt] = useState("initial");
   const [listeningHistory, setListeningHistory] = useState<ListeningRecord[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -278,6 +287,7 @@ export default function HomePage() {
   const warmedTracksRef = useRef<Set<string>>(new Set());
   const recoveryAttemptedRef = useRef<Set<string>>(new Set());
   const autoplayPlayedRef = useRef<Set<string>>(new Set());
+  const suggestionCacheRef = useRef<Map<string, Track[]>>(new Map());
   const upNextRef = useRef<Track[]>([]);
   const selectTrackRef = useRef<(track: Track) => void>(() => undefined);
   const playingRef = useRef(false);
@@ -337,12 +347,20 @@ export default function HomePage() {
   const topArtist = tasteSeeds[0] || current.artist;
   const albumGroups = useMemo(() => {
     const unique = new Map<string, Track>();
-    for (const track of catalogSections.flatMap((section) => section.tracks)) {
+    const candidates = [
+      ...recommendations,
+      ...listeningHistory.map((item) => item.track),
+      ...catalogSections.flatMap((section) => section.tracks),
+    ];
+    for (const track of candidates) {
+      if (!track.albumId || !track.album || track.album === "Single") continue;
       const key = `${track.album || track.title}|${track.artist}`.toLowerCase();
       if (!unique.has(key)) unique.set(key, track);
     }
-    return [...unique.values()];
-  }, [catalogSections]);
+    return [...unique.values()].sort((left, right) => (
+      discoveryScore(left.albumId || left.id, discoverySalt) - discoveryScore(right.albumId || right.id, discoverySalt)
+    ));
+  }, [catalogSections, discoverySalt, listeningHistory, recommendations]);
   const popularArtists = useMemo(() => {
     const unique = new Map<string, Track>();
     for (const track of [...recentTracks, ...recommendations, ...catalogSections.flatMap((section) => section.tracks)]) {
@@ -351,6 +369,22 @@ export default function HomePage() {
     }
     return [...unique.values()].slice(0, 12);
   }, [catalogSections, recentTracks, recommendations]);
+  const radioStations = useMemo(() => {
+    const unique = new Map<string, Track>();
+    const candidates = [
+      ...tasteSeedTracks,
+      ...listeningHistory.map((item) => item.track),
+      current,
+      ...recommendations,
+    ];
+    for (const track of candidates) {
+      const key = track.artist.trim().toLowerCase();
+      if (key && track.artist.length <= 48 && !unique.has(key)) unique.set(key, track);
+    }
+    return [...unique.values()]
+      .sort((left, right) => discoveryScore(left.artist, discoverySalt) - discoveryScore(right.artist, discoverySalt))
+      .slice(0, 8);
+  }, [current, discoverySalt, listeningHistory, recommendations, tasteSeedTracks]);
   const autoplayTracks = useMemo(() => {
     const queuedIds = new Set([current.videoId, ...upNext.map((track) => track.videoId)]);
     const unique = new Map<string, Track>();
@@ -575,6 +609,7 @@ export default function HomePage() {
     setSelectedAlbum(null);
     setAlbumRelease(null);
     setActiveNav(destination);
+    if (destination === "Albums" || destination === "Radio") setDiscoverySalt(crypto.randomUUID());
     if (destination === "Library" || destination === "Favorite Songs") setSelectedPlaylistId(null);
   };
 
@@ -622,6 +657,22 @@ export default function HomePage() {
     }
   };
 
+  const startRadio = async (seedTrack: Track) => {
+    setShuffleEnabled(true);
+    try {
+      const response = await fetch(`${LOCAL_AUDIO_API}/recommend?seed=${encodeURIComponent(seedTrack.artist)}&seedId=${encodeURIComponent(seedTrack.videoId)}&exclude=${encodeURIComponent(seedTrack.videoId)}`);
+      const payload = await response.json() as { tracks?: ApiTrack[] };
+      if (response.ok) {
+        const stationTracks = mapApiTracks(payload.tracks || []).filter((track) => track.videoId !== seedTrack.videoId);
+        commitUpNext(stationTracks);
+        stationTracks.slice(0, 4).forEach(warmTrack);
+      }
+    } catch {
+      // Start the seed even if the station cannot be expanded immediately.
+    }
+    selectTrack(seedTrack);
+  };
+
   const playShuffle = () => {
     const pool = results.length ? results : catalog;
     if (!pool.length) return;
@@ -658,7 +709,7 @@ export default function HomePage() {
     queueMicrotask(() => {
       if (!mounted) return;
       try {
-        const saved = JSON.parse(localStorage.getItem("luma-profile") || "null") as { liked?: string[]; likedTracks?: Track[]; current?: Track; volume?: number; listeningHistory?: ListeningRecord[]; playlists?: Playlist[]; profileName?: string; notificationsRead?: boolean; upNext?: Track[]; suggestions?: Track[] } | null;
+        const saved = JSON.parse(localStorage.getItem("luma-profile") || "null") as { liked?: string[]; likedTracks?: Track[]; current?: Track; volume?: number; listeningHistory?: ListeningRecord[]; playlists?: Playlist[]; profileName?: string; notificationsRead?: boolean; upNext?: Track[] } | null;
         if (saved?.liked?.every((id) => typeof id === "string")) setLiked(saved.liked);
         if (Array.isArray(saved?.likedTracks)) setSavedLikedTracks(saved.likedTracks.map(normalizeSavedTrack));
         if (saved?.current && typeof saved.current.videoId === "string" && typeof saved.current.title === "string") {
@@ -682,13 +733,6 @@ export default function HomePage() {
           const restoredQueue = saved.upNext.filter((track) => track?.videoId && track?.title).map(normalizeSavedTrack).slice(0, 100);
           upNextRef.current = restoredQueue;
           setUpNext(restoredQueue);
-        }
-        if (Array.isArray(saved?.suggestions)) {
-          setTrackSuggestions(saved.suggestions
-            .filter((track) => track?.videoId && track?.title)
-            .map(normalizeSavedTrack)
-            .filter((track, index, items) => items.findIndex((item) => item.videoId === track.videoId) === index)
-            .slice(0, 120));
         }
         if (Array.isArray(saved?.listeningHistory)) {
           setListeningHistory(saved.listeningHistory
@@ -825,11 +869,13 @@ export default function HomePage() {
     if (!detailOpen || !backendReady) return;
     const lyricsController = new AbortController();
     const suggestionsController = new AbortController();
+    const cachedSuggestions = suggestionCacheRef.current.get(current.videoId) || [];
     queueMicrotask(() => {
       if (lyricsController.signal.aborted || suggestionsController.signal.aborted) return;
       setLyricsLoading(true);
       setSuggestionsLoading(true);
       setLyrics([]);
+      setTrackSuggestions(cachedSuggestions);
     });
 
     const lyricParams = new URLSearchParams({ id: current.videoId, title: current.title, artist: current.artist, duration: String(Math.round(timelineDuration || 0)) });
@@ -851,10 +897,12 @@ export default function HomePage() {
       .then(async (response) => {
         const payload = await response.json() as { tracks?: ApiTrack[]; error?: string };
         if (!response.ok) throw new Error(payload.error || "Suggestions unavailable.");
-        const mapped = mapApiTracks(payload.tracks || []).filter((track) => track.videoId !== current.videoId).slice(0, 8);
-        setTrackSuggestions((previous) => [...previous, ...mapped]
+        const mapped = mapApiTracks(payload.tracks || []).filter((track) => track.videoId !== current.videoId);
+        const contextual = [...cachedSuggestions, ...mapped]
           .filter((track, index, items) => items.findIndex((item) => item.videoId === track.videoId) === index)
-          .slice(0, 120));
+          .slice(0, 60);
+        suggestionCacheRef.current.set(current.videoId, contextual);
+        setTrackSuggestions(contextual);
         mapped.slice(0, 3).forEach(warmTrack);
       })
       .catch(() => undefined)
@@ -915,8 +963,8 @@ export default function HomePage() {
     currentRef.current = current;
     const persistentCurrent = current.localUrl ? tracks[0] : current;
     const persistentHistory = listeningHistory.filter((item) => !item.track.localUrl);
-    localStorage.setItem("luma-profile", JSON.stringify({ liked, likedTracks: likedTracks.filter((track) => !track.localUrl), current: persistentCurrent, volume, listeningHistory: persistentHistory, playlists: playlists.map((playlist) => ({ ...playlist, tracks: playlist.tracks.filter((track) => !track.localUrl) })), profileName, notificationsRead, upNext: upNext.filter((track) => !track.localUrl), suggestions: trackSuggestions }));
-  }, [current, liked, likedTracks, listeningHistory, notificationsRead, playlists, profileName, profileReady, trackSuggestions, upNext, volume]);
+    localStorage.setItem("luma-profile", JSON.stringify({ liked, likedTracks: likedTracks.filter((track) => !track.localUrl), current: persistentCurrent, volume, listeningHistory: persistentHistory, playlists: playlists.map((playlist) => ({ ...playlist, tracks: playlist.tracks.filter((track) => !track.localUrl) })), profileName, notificationsRead, upNext: upNext.filter((track) => !track.localUrl) }));
+  }, [current, liked, likedTracks, listeningHistory, notificationsRead, playlists, profileName, profileReady, upNext, volume]);
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
@@ -1136,7 +1184,7 @@ export default function HomePage() {
 
             {!query && activeNav === "Albums" && (
               <section className="section-block collection-view">
-                <div className="section-heading"><div><p className="eyebrow">Fresh from your catalog</p><h2>Albums & releases</h2></div></div>
+                <div className="section-heading"><div><p className="eyebrow">Refreshed from your listening</p><h2>Albums for you</h2></div><span className="section-note">A different mix each visit</span></div>
                 <div className="album-carousel roomy">
                   {albumGroups.slice(0, 30).map((track) => <button className="catalog-card" key={`${track.album}-${track.artist}`} onClick={() => track.albumId ? openAlbum({ type: "album", id: track.albumId, title: track.album || track.title, artist: track.artist, cover: track.cover }) : setQuery(`${track.album} ${track.artist}`)}><span className="catalog-cover"><Image src={artworkUrl(track.cover)} alt="" width={240} height={240} unoptimized /><i><ChevronRight size={18} /></i></span><strong>{track.album || track.title}</strong><small>{track.artist}</small><em>Album</em></button>)}
                 </div>
@@ -1154,9 +1202,9 @@ export default function HomePage() {
 
             {!query && activeNav === "Radio" && (
               <section className="section-block collection-view">
-                <div className="section-heading"><div><p className="eyebrow">Endless listening</p><h2>Radio stations for you</h2></div></div>
+                <div className="section-heading"><div><p className="eyebrow">Built from your recent listening</p><h2>Radio stations for you</h2></div><span className="section-note">Each station builds a fresh related queue</span></div>
                 <div className="radio-grid">
-                  {catalogSections.slice(0, 6).map((section, index) => <button key={section.id} className="radio-card" onClick={() => { const station = section.tracks[Math.floor(Math.random() * section.tracks.length)]; if (station) { setShuffleEnabled(true); selectTrack(station); } }}><span className="radio-art"><Image src={artworkUrl(section.tracks[0]?.cover || current.cover)} alt="" width={180} height={180} unoptimized /><Radio /></span><span><small>STATION {String(index + 1).padStart(2, "0")}</small><strong>{section.title} Radio</strong><em>{section.subtitle}</em></span></button>)}
+                  {radioStations.map((station, index) => <button key={`${station.artist}-${station.videoId}`} className="radio-card" onClick={() => void startRadio(station)}><span className="radio-art"><Image src={artworkUrl(station.cover)} alt="" width={180} height={180} unoptimized /><Radio /></span><span><small>STATION {String(index + 1).padStart(2, "0")}</small><strong>{station.artist} Radio</strong><em>Starting with {station.title}, then closely related music</em></span></button>)}
                 </div>
               </section>
             )}
