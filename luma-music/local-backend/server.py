@@ -200,12 +200,14 @@ def music_catalog_track(entry: dict[str, Any], reason: str | None = None, album_
     ) or clean_artist(str(entry.get("author") or entry.get("channel") or "YouTube Music"))
     album_data = entry.get("album")
     album = str(album_data.get("name") or "Single") if isinstance(album_data, dict) else "Single"
+    album_id = str(album_data.get("id") or album_data.get("browseId") or "") if isinstance(album_data, dict) else ""
     title, _ = clean_title(str(entry.get("title") or "Untitled"))
     return {
         "videoId": video_id,
         "title": title,
         "artist": artist,
         "album": clean_display_text(album),
+        "albumId": album_id,
         "cover": best_thumbnail(entry),
         "durationSeconds": duration_seconds(entry.get("duration_seconds") or entry.get("length") or entry.get("duration")),
         "reason": reason,
@@ -391,7 +393,13 @@ def search_bundle(query: str) -> dict[str, Any]:
     albums: list[dict[str, Any]] = []
     try:
         seen: set[tuple[str, str]] = set()
-        for entry in _ytmusic.search(query, limit=30):
+        # Album-filtered results put an artist's actual discography ahead of
+        # similarly named singles, covers and unrelated video results.
+        entity_entries = [
+            *_ytmusic.search(query, filter="albums", limit=12),
+            *_ytmusic.search(query, limit=30),
+        ]
+        for entry in entity_entries:
             entity = entity_result(entry)
             if not entity:
                 continue
@@ -404,7 +412,11 @@ def search_bundle(query: str) -> dict[str, Any]:
         print(f"[luma-audio] entity search unavailable: {error}")
     query_key = normalized_text(query)
     artists.sort(key=lambda item: (normalized_text(item["title"]) != query_key, query_key not in normalized_text(item["title"])))
-    albums.sort(key=lambda item: (normalized_text(item["title"]) != query_key, query_key not in normalized_text(item["title"])))
+    albums.sort(key=lambda item: (
+        query_key not in normalized_text(item.get("artist") or ""),
+        normalized_text(item["title"]) != query_key,
+        query_key not in normalized_text(item["title"]),
+    ))
     return {"tracks": tracks, "artists": artists[:4], "albums": albums[:6]}
 
 
@@ -471,6 +483,40 @@ def catalog_sections() -> dict[str, Any]:
     return payload
 
 
+def album_release(browse_id: str) -> dict[str, Any]:
+    album = _ytmusic.get_album(browse_id)
+    album_title = clean_display_text(str(album.get("title") or "Album"))
+    artists = album.get("artists") or []
+    album_artist = ", ".join(
+        clean_display_text(str(item.get("name") or ""))
+        for item in artists
+        if isinstance(item, dict) and item.get("name")
+    )
+    album_cover = best_thumbnail(album)
+    tracks = []
+    for entry in album.get("tracks") or []:
+        # get_album already gives us the canonical release tracklist. Some
+        # entries omit videoType even though they are proper album audio, so
+        # applying the recommendation-only ATV guard here would hide them.
+        track = music_catalog_track(entry)
+        if not track:
+            continue
+        track["album"] = album_title
+        track["albumId"] = browse_id
+        track["cover"] = album_cover
+        if album_artist and track["artist"] == "YouTube Music":
+            track["artist"] = album_artist
+        tracks.append(track)
+    return {
+        "id": browse_id,
+        "title": album_title,
+        "artist": album_artist,
+        "cover": album_cover,
+        "year": str(album.get("year") or ""),
+        "tracks": tracks,
+    }
+
+
 def entry_to_track(entry: dict[str, Any], reason: str | None = None) -> dict[str, Any]:
     video_id = str(entry.get("id") or "")
     duration = entry.get("duration")
@@ -503,7 +549,7 @@ def recommend_music(
         try:
             mix = _ytmusic.get_watch_playlist(videoId=seed_id, limit=18)
             for entry in mix.get("tracks") or []:
-                track = music_catalog_track(entry, reason)
+                track = music_catalog_track(entry, reason, album_only=True)
                 if not track or track["videoId"] in seen_ids:
                     continue
                 seen_ids.add(track["videoId"])
@@ -837,6 +883,13 @@ class LumaHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/catalog":
                 self.send_json(200, catalog_sections())
+                return
+            if parsed.path == "/album":
+                browse_id = (query.get("id") or [""])[0].strip()
+                if not browse_id or len(browse_id) > 160 or not re.fullmatch(r"[A-Za-z0-9_-]+", browse_id):
+                    self.send_json(400, {"error": "Invalid album id."})
+                    return
+                self.send_json(200, album_release(browse_id))
                 return
             if parsed.path == "/recommend":
                 raw_seeds = (query.get("seed") or [""])[0]

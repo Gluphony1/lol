@@ -67,6 +67,7 @@ type Track = {
   title: string;
   artist: string;
   album: string;
+  albumId?: string;
   cover: string;
   color: string;
   duration: string;
@@ -99,6 +100,7 @@ type ApiTrack = {
   title: string;
   artist: string;
   album: string;
+  albumId?: string;
   cover: string;
   durationSeconds: number;
   reason?: string | null;
@@ -110,6 +112,11 @@ type SearchEntity = {
   title: string;
   artist: string;
   cover: string;
+};
+
+type AlbumRelease = SearchEntity & {
+  year?: string;
+  tracks: Track[];
 };
 
 type CatalogSection = {
@@ -171,6 +178,7 @@ const mapApiTracks = (items: ApiTrack[]) => items.map((track, index): Track => (
   title: track.title,
   artist: track.artist,
   album: track.album,
+  albumId: track.albumId,
   cover: track.cover,
   color: resultColors[index % resultColors.length],
   duration: durationLabel(track.durationSeconds || 0),
@@ -247,7 +255,12 @@ export default function HomePage() {
   const [remoteResults, setRemoteResults] = useState<Track[]>([]);
   const [searchArtists, setSearchArtists] = useState<SearchEntity[]>([]);
   const [searchAlbums, setSearchAlbums] = useState<SearchEntity[]>([]);
+  const [selectedArtist, setSelectedArtist] = useState<string | null>(null);
+  const [selectedAlbum, setSelectedAlbum] = useState<SearchEntity | null>(null);
+  const [albumRelease, setAlbumRelease] = useState<AlbumRelease | null>(null);
+  const [albumLoading, setAlbumLoading] = useState(false);
   const [recommendations, setRecommendations] = useState<Track[]>([]);
+  const [moreRecommendationsLoading, setMoreRecommendationsLoading] = useState(false);
   const [localFiles, setLocalFiles] = useState<Track[]>([]);
   const [catalogSections, setCatalogSections] = useState<CatalogSection[]>([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
@@ -257,6 +270,7 @@ export default function HomePage() {
   const [playerRecovery, setPlayerRecovery] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const lyricsScrollRef = useRef<HTMLDivElement | null>(null);
+  const pickedCarouselRef = useRef<HTMLDivElement | null>(null);
   const lyricLineRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const currentRef = useRef<Track>(current);
   const queueRef = useRef<Track[]>(tracks);
@@ -315,8 +329,10 @@ export default function HomePage() {
     if (activeNav === "Favorite Songs" || activeNav === "Library") return libraryTracks;
     if (activeNav === "Recently Played") return listeningHistory.map((item) => item.track);
     if (activeNav === "Local Files") return localFiles;
-    return recommendations.length ? recommendations : tracks;
-  }, [activeNav, libraryTracks, listeningHistory, localFiles, query, recommendations, remoteResults]);
+    if (recommendations.length) return recommendations;
+    const catalogTracks = catalogSections.flatMap((section) => section.tracks);
+    return catalogTracks.length ? catalogTracks : tracks;
+  }, [activeNav, catalogSections, libraryTracks, listeningHistory, localFiles, query, recommendations, remoteResults]);
   const recentTracks = listeningHistory.length ? listeningHistory.map((item) => item.track) : tracks;
   const topArtist = tasteSeeds[0] || current.artist;
   const albumGroups = useMemo(() => {
@@ -555,8 +571,55 @@ export default function HomePage() {
 
   const navigate = (destination: string) => {
     setQuery("");
+    setSelectedArtist(null);
+    setSelectedAlbum(null);
+    setAlbumRelease(null);
     setActiveNav(destination);
     if (destination === "Library" || destination === "Favorite Songs") setSelectedPlaylistId(null);
+  };
+
+  const openArtist = (artist: string) => {
+    setSelectedArtist(artist);
+    setSelectedAlbum(null);
+    setAlbumRelease(null);
+    setActiveNav("Artists");
+    setQuery(artist);
+  };
+
+  const openAlbum = (album: SearchEntity) => {
+    setSelectedAlbum(album);
+    setSelectedArtist(null);
+    setAlbumRelease(null);
+    setActiveNav("Albums");
+    setQuery(`${album.title} ${album.artist}`.trim());
+  };
+
+  const loadMoreRecommendations = async () => {
+    if (moreRecommendationsLoading || !backendReady) return;
+    setMoreRecommendationsLoading(true);
+    const seed = tasteSeeds.length ? tasteSeeds.join("|") : current.artist;
+    const seedIds = tasteSeedTracks.map((track) => track.videoId).join(",") || current.videoId;
+    const excluded = [...new Set([current.videoId, ...recommendations.map((track) => track.videoId)])].slice(-100).join(",");
+    try {
+      const response = await fetch(`${LOCAL_AUDIO_API}/recommend?seed=${encodeURIComponent(seed)}&seedId=${encodeURIComponent(seedIds)}&exclude=${encodeURIComponent(excluded)}`);
+      const payload = await response.json() as { tracks?: ApiTrack[] };
+      if (!response.ok) throw new Error("Recommendations unavailable");
+      const incoming = mapApiTracks(payload.tracks || []);
+      setRecommendations((previous) => [...previous, ...incoming].filter((track, index, items) => items.findIndex((item) => item.videoId === track.videoId) === index).slice(0, 120));
+    } catch {
+      // Keep the current carousel intact when the local service is briefly unavailable.
+    } finally {
+      setMoreRecommendationsLoading(false);
+    }
+  };
+
+  const scrollPicked = (direction: -1 | 1) => {
+    const carousel = pickedCarouselRef.current;
+    if (!carousel) return;
+    carousel.scrollBy({ left: direction * Math.max(320, carousel.clientWidth * 0.82), behavior: "smooth" });
+    if (direction > 0 && carousel.scrollWidth - carousel.scrollLeft - carousel.clientWidth < carousel.clientWidth * 1.5) {
+      void loadMoreRecommendations();
+    }
   };
 
   const playShuffle = () => {
@@ -740,6 +803,25 @@ export default function HomePage() {
   }, [backendReady, catalogSections.length, profileReady]);
 
   useEffect(() => {
+    if (!selectedAlbum?.id || !backendReady) return;
+    const controller = new AbortController();
+    queueMicrotask(() => setAlbumLoading(true));
+    void fetch(`${LOCAL_AUDIO_API}/album?id=${encodeURIComponent(selectedAlbum.id)}`, { signal: controller.signal })
+      .then(async (response) => {
+        const payload = await response.json() as Omit<AlbumRelease, "tracks"> & { tracks?: ApiTrack[] };
+        if (!response.ok) throw new Error("Album unavailable");
+        setAlbumRelease({ ...payload, type: "album", tracks: mapApiTracks(payload.tracks || []) });
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setAlbumRelease(null);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setAlbumLoading(false);
+      });
+    return () => controller.abort();
+  }, [backendReady, selectedAlbum]);
+
+  useEffect(() => {
     if (!detailOpen || !backendReady) return;
     const lyricsController = new AbortController();
     const suggestionsController = new AbortController();
@@ -916,11 +998,10 @@ export default function HomePage() {
 
         <main className="content">
           <header className="topbar">
-            <div className="history-controls"><button aria-label="Go back" onClick={() => window.history.back()}><ChevronLeft /></button><button aria-label="Go forward" onClick={() => window.history.forward()}><ChevronRight /></button></div>
             <label className="search-box">
               <Search size={18} />
-              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search songs, artists or albums" aria-label="Search music" />
-              <kbd>⌘ K</kbd>
+              <input value={query} onChange={(event) => { setSelectedArtist(null); setSelectedAlbum(null); setAlbumRelease(null); setQuery(event.target.value); }} placeholder="Search songs, artists or albums" aria-label="Search music" />
+              <kbd title="Focus search with Ctrl+K">Ctrl K</kbd>
             </label>
             <nav className="browse-tabs" aria-label="Browse shortcuts">
               <button onClick={() => navigate("Albums")}>New Releases</button>
@@ -945,16 +1026,16 @@ export default function HomePage() {
 
           <div className="scroll-area">
             <section className="intro-row">
-              <div><p className="eyebrow">Luma music</p><h1>{query ? "Search results" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Browse" && detailOpen ? current.title : activeNav}</h1></div>
+              <div><p className="eyebrow">Luma music</p><h1>{selectedAlbum ? selectedAlbum.title : selectedArtist || (query ? "Search results" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Browse" && detailOpen ? current.title : activeNav)}</h1></div>
               <p>{query ? searching ? "Finding songs and official music releases…" : `${results.length} music results` : activeNav === "Browse" ? "Music, albums and artists tuned to what you actually play." : activeNav === "Local Files" ? "Music from this device stays private in your browser." : "Explore your music without leaving the flow."}</p>
             </section>
 
-            {query && (searchArtists.length > 0 || searchAlbums.length > 0) && (
+            {query && !selectedArtist && !selectedAlbum && (searchArtists.length > 0 || searchAlbums.length > 0) && (
               <section className="search-entities" aria-label="Artists and albums">
                 <div className="section-heading"><div><p className="eyebrow">Best matches</p><h2>Artists & albums</h2></div></div>
                 <div className="entity-grid">
-                  {searchArtists.slice(0, 2).map((entity) => <button className="entity-card artist-entity" key={`artist-${entity.id}`} onClick={() => setQuery(entity.title)}><Image src={artworkUrl(entity.cover)} alt="" width={72} height={72} unoptimized /><span><small><UserRound size={13} /> Artist</small><strong>{entity.title}</strong><em>Explore songs</em></span><ChevronRight /></button>)}
-                  {searchAlbums.slice(0, 4).map((entity) => <button className="entity-card" key={`album-${entity.id}`} onClick={() => setQuery(`${entity.title} ${entity.artist}`.trim())}><Image src={artworkUrl(entity.cover)} alt="" width={72} height={72} unoptimized /><span><small><Disc3 size={13} /> Album</small><strong>{entity.title}</strong><em>{entity.artist || "YouTube Music"}</em></span><ChevronRight /></button>)}
+                  {searchArtists.slice(0, 2).map((entity) => <button className="entity-card artist-entity" key={`artist-${entity.id}`} onClick={() => openArtist(entity.title)}><Image src={artworkUrl(entity.cover)} alt="" width={72} height={72} unoptimized /><span><small><UserRound size={13} /> Artist</small><strong>{entity.title}</strong><em>Explore songs</em></span><ChevronRight /></button>)}
+                  {searchAlbums.slice(0, 4).map((entity) => <button className="entity-card" key={`album-${entity.id}`} onClick={() => openAlbum(entity)}><Image src={artworkUrl(entity.cover)} alt="" width={72} height={72} unoptimized /><span><small><Disc3 size={13} /> Album</small><strong>{entity.title}</strong><em>{entity.artist || "YouTube Music"}</em></span><ChevronRight /></button>)}
                 </div>
               </section>
             )}
@@ -965,7 +1046,7 @@ export default function HomePage() {
                 <div className="home-focus-copy">
                   <span className="feature-label"><Sparkles size={14} /> Continue listening</span>
                   <h2>{current.title}</h2>
-                  <p>{current.artist}</p>
+                  <button className="hero-artist" onClick={() => openArtist(current.artist)}>{current.artist}</button>
                   <div className="hero-actions">
                     <Button className="hero-play" onClick={togglePlayback}>{playing ? <Pause fill="currentColor" /> : <Play fill="currentColor" />} {playing ? "Pause" : "Play"}</Button>
                     <button className={liked.includes(current.id) ? "round-secondary liked" : "round-secondary"} aria-label="Like current song" onClick={() => toggleLike(current.id)}><Heart size={19} fill={liked.includes(current.id) ? "currentColor" : "none"} /></button>
@@ -983,7 +1064,7 @@ export default function HomePage() {
               <section className="popular-artists section-block" aria-label="Popular artists">
                 <div className="section-heading"><div><p className="eyebrow">Artists for you</p><h2>Popular artists</h2></div><button onClick={() => navigate("Artists")}>See all <ChevronRight size={16} /></button></div>
                 <div className="artist-carousel">
-                  {popularArtists.slice(0, 8).map((track) => <button key={track.artist} className="artist-bubble" onClick={() => { setQuery(track.artist); setActiveNav("Artists"); }}><Image src={artworkUrl(track.cover)} alt="" width={112} height={112} unoptimized /><strong>{track.artist}</strong><span>Artist</span></button>)}
+                  {popularArtists.slice(0, 8).map((track) => <button key={track.artist} className="artist-bubble" onClick={() => openArtist(track.artist)}><Image src={artworkUrl(track.cover)} alt="" width={112} height={112} unoptimized /><strong>{track.artist}</strong><span>Artist</span></button>)}
                 </div>
               </section>
             )}
@@ -1021,6 +1102,30 @@ export default function HomePage() {
               </div>
             )}
 
+            {selectedArtist && (
+              <section className="artist-detail" aria-label={`${selectedArtist} artist page`}>
+                <div className="artist-detail-hero">
+                  <Image src={artworkUrl(searchArtists[0]?.cover || remoteResults[0]?.cover || current.cover)} alt="" width={180} height={180} unoptimized />
+                  <div><p className="eyebrow">Artist</p><h2>{selectedArtist}</h2><p>{remoteResults.length} songs available in Luma</p><Button onClick={() => remoteResults[0] && selectTrack(remoteResults[0])}><Play fill="currentColor" /> Play</Button></div>
+                </div>
+                {searchAlbums.length > 0 && <div className="artist-release-block"><div className="section-heading"><div><p className="eyebrow">Discography</p><h2>Albums & releases</h2></div></div><div className="catalog-carousel">{searchAlbums.map((album) => <button className="catalog-card" key={album.id} onClick={() => openAlbum(album)}><span className="catalog-cover"><Image src={artworkUrl(album.cover)} alt="" width={220} height={220} unoptimized /><i><ChevronRight /></i></span><strong>{album.title}</strong><small>{album.artist || selectedArtist}</small><em>Album</em></button>)}</div></div>}
+                <div className="artist-release-block"><div className="section-heading"><div><p className="eyebrow">Popular</p><h2>Songs</h2></div></div><div className="track-list">{remoteResults.slice(0, 12).map((track, index) => <button className="track-row" key={track.videoId} onClick={() => selectTrack(track)}><span className="track-number">{String(index + 1).padStart(2, "0")}</span><Image src={artworkUrl(track.cover)} alt="" width={52} height={52} unoptimized /><span className="track-title"><strong>{track.title}</strong><small>{track.artist}</small></span><span className="track-album">{track.album}</span><span className="track-duration">{track.duration}</span><Play size={16} /></button>)}</div></div>
+              </section>
+            )}
+
+            {selectedAlbum && (
+              <section className="album-detail" aria-label={`${selectedAlbum.title} album page`}>
+                <div className="album-detail-hero">
+                  <Image src={artworkUrl(albumRelease?.cover || selectedAlbum.cover)} alt="" width={220} height={220} unoptimized />
+                  <div><p className="eyebrow">Album{albumRelease?.year ? ` · ${albumRelease.year}` : ""}</p><h2>{albumRelease?.title || selectedAlbum.title}</h2><button className="detail-artist-link" onClick={() => openArtist(albumRelease?.artist || selectedAlbum.artist)}>{albumRelease?.artist || selectedAlbum.artist}</button><p>{albumRelease?.tracks.length || 0} songs</p><Button onClick={() => albumRelease?.tracks[0] && selectTrack(albumRelease.tracks[0])}><Play fill="currentColor" /> Play album</Button></div>
+                </div>
+                <div className="album-track-list track-list">
+                  {albumLoading && <div className="suggestion-loading">Loading album…</div>}
+                  {!albumLoading && albumRelease?.tracks.map((track, index) => <button className="track-row" key={track.videoId} onClick={() => selectTrack(track)}><span className="track-number">{String(index + 1).padStart(2, "0")}</span><Image src={artworkUrl(albumRelease.cover)} alt="" width={52} height={52} unoptimized /><span className="track-title"><strong>{track.title}</strong><small>{track.artist}</small></span><span className="track-album">{albumRelease.title}</span><span className="track-duration">{track.duration}</span><Play size={16} /></button>)}
+                </div>
+              </section>
+            )}
+
             {!query && activeNav === "Local Files" && (
               <section className="local-import">
                 <FileAudio size={28} />
@@ -1033,7 +1138,7 @@ export default function HomePage() {
               <section className="section-block collection-view">
                 <div className="section-heading"><div><p className="eyebrow">Fresh from your catalog</p><h2>Albums & releases</h2></div></div>
                 <div className="album-carousel roomy">
-                  {albumGroups.slice(0, 30).map((track) => <button className="catalog-card" key={`${track.album}-${track.artist}`} onClick={() => setQuery(`${track.album} ${track.artist}`)}><span className="catalog-cover"><Image src={artworkUrl(track.cover)} alt="" width={240} height={240} unoptimized /><i><Search size={18} /></i></span><strong>{track.album || track.title}</strong><small>{track.artist}</small><em>Album</em></button>)}
+                  {albumGroups.slice(0, 30).map((track) => <button className="catalog-card" key={`${track.album}-${track.artist}`} onClick={() => track.albumId ? openAlbum({ type: "album", id: track.albumId, title: track.album || track.title, artist: track.artist, cover: track.cover }) : setQuery(`${track.album} ${track.artist}`)}><span className="catalog-cover"><Image src={artworkUrl(track.cover)} alt="" width={240} height={240} unoptimized /><i><ChevronRight size={18} /></i></span><strong>{track.album || track.title}</strong><small>{track.artist}</small><em>Album</em></button>)}
                 </div>
               </section>
             )}
@@ -1042,7 +1147,7 @@ export default function HomePage() {
               <section className="section-block collection-view">
                 <div className="section-heading"><div><p className="eyebrow">Based on your listening</p><h2>Artists to explore</h2></div></div>
                 <div className="artist-grid">
-                  {popularArtists.map((track) => <button key={track.artist} className="artist-bubble" onClick={() => setQuery(track.artist)}><Image src={artworkUrl(track.cover)} alt="" width={150} height={150} unoptimized /><strong>{track.artist}</strong><span>View songs</span></button>)}
+                  {popularArtists.map((track) => <button key={track.artist} className="artist-bubble" onClick={() => openArtist(track.artist)}><Image src={artworkUrl(track.cover)} alt="" width={150} height={150} unoptimized /><strong>{track.artist}</strong><span>View songs</span></button>)}
                 </div>
               </section>
             )}
@@ -1056,10 +1161,10 @@ export default function HomePage() {
               </section>
             )}
 
-            {(query || !["Albums", "Artists", "Radio"].includes(activeNav)) && <section className="section-block">
-              <div className="section-heading"><div><p className="eyebrow">{query ? "Music only" : activeNav === "Library" || activeNav === "Favorite Songs" ? "Inside this collection" : activeNav === "Recently Played" ? "Your listening history" : activeNav === "Local Files" ? "On this device" : recommendations.length ? "Based on your listening" : "Start your profile"}</p><h2>{query ? "Songs" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Recently Played" ? "Recently played" : activeNav === "Local Files" ? "Local songs" : activeNav === "Songs" ? "Songs picked for you" : "Picked for you"}</h2></div>{!query && activeNav === "Browse" && <button onClick={() => navigate("Songs")}>View all <ChevronRight size={16} /></button>}</div>
-              <div className={query ? "album-grid search-grid" : "album-carousel"}>
-                {results.slice(0, query ? 18 : activeNav === "Browse" ? 12 : 30).map((track) => (
+            {!selectedArtist && !selectedAlbum && (query || !["Albums", "Artists", "Radio"].includes(activeNav)) && <section className="section-block">
+              <div className="section-heading"><div><p className="eyebrow">{query ? "Music only" : activeNav === "Library" || activeNav === "Favorite Songs" ? "Inside this collection" : activeNav === "Recently Played" ? "Your listening history" : activeNav === "Local Files" ? "On this device" : recommendations.length ? "Recommended from your listening" : "Start your profile"}</p><h2>{query ? "Songs" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Recently Played" ? "Recently played" : activeNav === "Local Files" ? "Local songs" : activeNav === "Songs" ? "Songs picked for you" : "Picked for you"}</h2></div>{!query && ["Browse", "Songs"].includes(activeNav) && <div className="carousel-controls"><span>{moreRecommendationsLoading ? "Finding more…" : "More like what you play"}</span><button onClick={() => scrollPicked(-1)} aria-label="Scroll recommendations left"><ChevronLeft /></button><button onClick={() => scrollPicked(1)} aria-label="Scroll recommendations right"><ChevronRight /></button></div>}</div>
+              <div ref={!query && ["Browse", "Songs"].includes(activeNav) ? pickedCarouselRef : undefined} className={query ? "album-grid search-grid" : "album-carousel"} onScroll={(event) => { const element = event.currentTarget; if (!query && element.scrollWidth - element.scrollLeft - element.clientWidth < element.clientWidth) void loadMoreRecommendations(); }}>
+                {results.slice(0, query ? 18 : ["Browse", "Songs"].includes(activeNav) ? 60 : 30).map((track) => (
                   <article className={current.videoId === track.videoId ? "album-card selected" : "album-card"} key={track.id}>
                     <button className="cover-button" onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => selectTrack(track)} aria-label={`Play ${track.title} by ${track.artist}`}>
                       <Image src={artworkUrl(track.cover)} alt="" width={360} height={360} unoptimized />
@@ -1193,12 +1298,14 @@ export default function HomePage() {
         <Dialog open={profileOpen} onOpenChange={setProfileOpen}>
           <DialogContent className="profile-dialog">
             <DialogHeader>
-              <div className="profile-dialog-avatar">{viewerInitials}</div>
+              <div className="profile-cover"><div className="profile-dialog-avatar">{viewerInitials}</div><Sparkles /></div>
+              <p className="eyebrow">Your Luma profile</p>
               <DialogTitle>{viewerName}</DialogTitle>
-              <DialogDescription>{viewer?.email || "Local profile saved on this device"}</DialogDescription>
+              <DialogDescription>{viewer?.email || "Your listening profile lives on this device"}</DialogDescription>
             </DialogHeader>
             <label className="profile-name-field"><span>Display name</span><input value={profileDraft} maxLength={60} onChange={(event) => setProfileDraft(event.target.value)} placeholder="Your name" /></label>
             <div className="profile-stats"><div><strong>{likedTracks.length}</strong><span>Liked</span></div><div><strong>{listeningHistory.length}</strong><span>Played</span></div><div><strong>{topArtist}</strong><span>Top artist</span></div></div>
+            <div className="profile-taste"><span>Your sound</span><div>{tasteSeeds.slice(0, 4).map((artist) => <button key={artist} onClick={() => { openArtist(artist); setProfileOpen(false); }}>{artist}</button>)}</div></div>
             <div className="profile-status"><span className={backendReady ? "service-dot online" : "service-dot"} />{backendReady ? "Local audio service connected" : "Local audio service offline"}</div>
             <div className="profile-actions"><Button onClick={() => { setProfileName(profileDraft.trim().slice(0, 60)); setProfileOpen(false); }}>Save profile</Button><Button variant="secondary" onClick={() => { navigate("Favorite Songs"); setProfileOpen(false); }}>Open library</Button>{viewer && <a href="/signout-with-chatgpt?return_to=/" target="_top">Sign out</a>}</div>
           </DialogContent>
