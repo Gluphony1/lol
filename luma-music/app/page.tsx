@@ -151,6 +151,18 @@ const tracks: Track[] = [
 
 const LOCAL_AUDIO_API = "http://127.0.0.1:8765";
 const resultColors = ["#ff5ca8", "#60a5fa", "#a78bfa", "#fb7185", "#818cf8", "#22d3ee"];
+const artworkUrl = (cover: string) => {
+  if (!cover.startsWith("https://")) return cover;
+  try {
+    const hostname = new URL(cover).hostname;
+    if (["yt3.googleusercontent.com", "lh3.googleusercontent.com", "i.ytimg.com"].includes(hostname)) {
+      return `${LOCAL_AUDIO_API}/artwork?url=${encodeURIComponent(cover)}`;
+    }
+  } catch {
+    return "/icon-192.png";
+  }
+  return cover;
+};
 
 const durationLabel = (seconds: number) => `${Math.floor(seconds / 60)}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`;
 const mapApiTracks = (items: ApiTrack[]) => items.map((track, index): Track => ({
@@ -309,12 +321,12 @@ export default function HomePage() {
   const topArtist = tasteSeeds[0] || current.artist;
   const albumGroups = useMemo(() => {
     const unique = new Map<string, Track>();
-    for (const track of catalog) {
+    for (const track of catalogSections.flatMap((section) => section.tracks)) {
       const key = `${track.album || track.title}|${track.artist}`.toLowerCase();
       if (!unique.has(key)) unique.set(key, track);
     }
     return [...unique.values()];
-  }, [catalog]);
+  }, [catalogSections]);
   const popularArtists = useMemo(() => {
     const unique = new Map<string, Track>();
     for (const track of [...recentTracks, ...recommendations, ...catalogSections.flatMap((section) => section.tracks)]) {
@@ -830,7 +842,7 @@ export default function HomePage() {
       title: current.title,
       artist: current.artist,
       album: current.album,
-      artwork: [{ src: current.cover, sizes: "480x360", type: "image/jpeg" }],
+      artwork: [{ src: artworkUrl(current.cover), sizes: "512x512", type: "image/jpeg" }],
     });
     navigator.mediaSession.playbackState = playing ? "playing" : "paused";
     navigator.mediaSession.setActionHandler("play", () => void audioRef.current?.play());
@@ -941,15 +953,15 @@ export default function HomePage() {
               <section className="search-entities" aria-label="Artists and albums">
                 <div className="section-heading"><div><p className="eyebrow">Best matches</p><h2>Artists & albums</h2></div></div>
                 <div className="entity-grid">
-                  {searchArtists.slice(0, 2).map((entity) => <button className="entity-card artist-entity" key={`artist-${entity.id}`} onClick={() => setQuery(entity.title)}><Image src={entity.cover} alt="" width={72} height={72} unoptimized /><span><small><UserRound size={13} /> Artist</small><strong>{entity.title}</strong><em>Explore songs</em></span><ChevronRight /></button>)}
-                  {searchAlbums.slice(0, 4).map((entity) => <button className="entity-card" key={`album-${entity.id}`} onClick={() => setQuery(`${entity.title} ${entity.artist}`.trim())}><Image src={entity.cover} alt="" width={72} height={72} unoptimized /><span><small><Disc3 size={13} /> Album</small><strong>{entity.title}</strong><em>{entity.artist || "YouTube Music"}</em></span><ChevronRight /></button>)}
+                  {searchArtists.slice(0, 2).map((entity) => <button className="entity-card artist-entity" key={`artist-${entity.id}`} onClick={() => setQuery(entity.title)}><Image src={artworkUrl(entity.cover)} alt="" width={72} height={72} unoptimized /><span><small><UserRound size={13} /> Artist</small><strong>{entity.title}</strong><em>Explore songs</em></span><ChevronRight /></button>)}
+                  {searchAlbums.slice(0, 4).map((entity) => <button className="entity-card" key={`album-${entity.id}`} onClick={() => setQuery(`${entity.title} ${entity.artist}`.trim())}><Image src={artworkUrl(entity.cover)} alt="" width={72} height={72} unoptimized /><span><small><Disc3 size={13} /> Album</small><strong>{entity.title}</strong><em>{entity.artist || "YouTube Music"}</em></span><ChevronRight /></button>)}
                 </div>
               </section>
             )}
 
             {!query && activeNav === "Browse" && (
               <section className="home-focus" aria-label="Continue listening">
-                <Image src={current.cover} alt={`${current.title} cover`} width={280} height={280} priority unoptimized />
+                <Image src={artworkUrl(current.cover)} alt={`${current.title} cover`} width={280} height={280} priority unoptimized />
                 <div className="home-focus-copy">
                   <span className="feature-label"><Sparkles size={14} /> Continue listening</span>
                   <h2>{current.title}</h2>
@@ -971,7 +983,7 @@ export default function HomePage() {
               <section className="popular-artists section-block" aria-label="Popular artists">
                 <div className="section-heading"><div><p className="eyebrow">Artists for you</p><h2>Popular artists</h2></div><button onClick={() => navigate("Artists")}>See all <ChevronRight size={16} /></button></div>
                 <div className="artist-carousel">
-                  {popularArtists.slice(0, 8).map((track) => <button key={track.artist} className="artist-bubble" onClick={() => { setQuery(track.artist); setActiveNav("Artists"); }}><Image src={track.cover} alt="" width={112} height={112} unoptimized /><strong>{track.artist}</strong><span>Artist</span></button>)}
+                  {popularArtists.slice(0, 8).map((track) => <button key={track.artist} className="artist-bubble" onClick={() => { setQuery(track.artist); setActiveNav("Artists"); }}><Image src={artworkUrl(track.cover)} alt="" width={112} height={112} unoptimized /><strong>{track.artist}</strong><span>Artist</span></button>)}
                 </div>
               </section>
             )}
@@ -989,7 +1001,7 @@ export default function HomePage() {
                 <aside className="suggestions-card">
                   <div className="lyrics-heading"><div><p className="eyebrow">Up next</p><h2>You might also like</h2></div><Sparkles size={18} /></div>
                   <div className="suggestion-list">
-                    {trackSuggestions.map((track, index) => <button key={track.videoId} className="suggestion-row" onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => { autoplayPlayedRef.current.add(track.videoId); selectTrack(track); }}><span>{String(index + 1).padStart(2, "0")}</span><Image src={track.cover} alt="" width={48} height={48} unoptimized /><span><strong>{track.title}</strong><small>{track.artist}</small></span><Play size={15} fill="currentColor" /></button>)}
+                    {trackSuggestions.map((track, index) => <button key={track.videoId} className="suggestion-row" onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => { autoplayPlayedRef.current.add(track.videoId); selectTrack(track); }}><span>{String(index + 1).padStart(2, "0")}</span><Image src={artworkUrl(track.cover)} alt="" width={48} height={48} unoptimized /><span><strong>{track.title}</strong><small>{track.artist}</small></span><Play size={15} fill="currentColor" /></button>)}
                     {suggestionsLoading && <div className="suggestion-loading">Adding more suggestions…</div>}
                     {!suggestionsLoading && trackSuggestions.length === 0 && <div className="suggestion-loading">Play another song to refresh suggestions.</div>}
                   </div>
@@ -1021,7 +1033,7 @@ export default function HomePage() {
               <section className="section-block collection-view">
                 <div className="section-heading"><div><p className="eyebrow">Fresh from your catalog</p><h2>Albums & releases</h2></div></div>
                 <div className="album-carousel roomy">
-                  {albumGroups.slice(0, 30).map((track) => <button className="catalog-card" key={`${track.album}-${track.artist}`} onClick={() => setQuery(`${track.album} ${track.artist}`)}><span className="catalog-cover"><Image src={track.cover} alt="" width={240} height={240} unoptimized /><i><Search size={18} /></i></span><strong>{track.album || track.title}</strong><small>{track.artist}</small><em>Album</em></button>)}
+                  {albumGroups.slice(0, 30).map((track) => <button className="catalog-card" key={`${track.album}-${track.artist}`} onClick={() => setQuery(`${track.album} ${track.artist}`)}><span className="catalog-cover"><Image src={artworkUrl(track.cover)} alt="" width={240} height={240} unoptimized /><i><Search size={18} /></i></span><strong>{track.album || track.title}</strong><small>{track.artist}</small><em>Album</em></button>)}
                 </div>
               </section>
             )}
@@ -1030,7 +1042,7 @@ export default function HomePage() {
               <section className="section-block collection-view">
                 <div className="section-heading"><div><p className="eyebrow">Based on your listening</p><h2>Artists to explore</h2></div></div>
                 <div className="artist-grid">
-                  {popularArtists.map((track) => <button key={track.artist} className="artist-bubble" onClick={() => setQuery(track.artist)}><Image src={track.cover} alt="" width={150} height={150} unoptimized /><strong>{track.artist}</strong><span>View songs</span></button>)}
+                  {popularArtists.map((track) => <button key={track.artist} className="artist-bubble" onClick={() => setQuery(track.artist)}><Image src={artworkUrl(track.cover)} alt="" width={150} height={150} unoptimized /><strong>{track.artist}</strong><span>View songs</span></button>)}
                 </div>
               </section>
             )}
@@ -1039,7 +1051,7 @@ export default function HomePage() {
               <section className="section-block collection-view">
                 <div className="section-heading"><div><p className="eyebrow">Endless listening</p><h2>Radio stations for you</h2></div></div>
                 <div className="radio-grid">
-                  {catalogSections.slice(0, 6).map((section, index) => <button key={section.id} className="radio-card" onClick={() => { const station = section.tracks[Math.floor(Math.random() * section.tracks.length)]; if (station) { setShuffleEnabled(true); selectTrack(station); } }}><span className="radio-art"><Image src={section.tracks[0]?.cover || current.cover} alt="" width={180} height={180} unoptimized /><Radio /></span><span><small>STATION {String(index + 1).padStart(2, "0")}</small><strong>{section.title} Radio</strong><em>{section.subtitle}</em></span></button>)}
+                  {catalogSections.slice(0, 6).map((section, index) => <button key={section.id} className="radio-card" onClick={() => { const station = section.tracks[Math.floor(Math.random() * section.tracks.length)]; if (station) { setShuffleEnabled(true); selectTrack(station); } }}><span className="radio-art"><Image src={artworkUrl(section.tracks[0]?.cover || current.cover)} alt="" width={180} height={180} unoptimized /><Radio /></span><span><small>STATION {String(index + 1).padStart(2, "0")}</small><strong>{section.title} Radio</strong><em>{section.subtitle}</em></span></button>)}
                 </div>
               </section>
             )}
@@ -1050,7 +1062,7 @@ export default function HomePage() {
                 {results.slice(0, query ? 18 : activeNav === "Browse" ? 12 : 30).map((track) => (
                   <article className={current.videoId === track.videoId ? "album-card selected" : "album-card"} key={track.id}>
                     <button className="cover-button" onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => selectTrack(track)} aria-label={`Play ${track.title} by ${track.artist}`}>
-                      <Image src={track.cover} alt="" width={360} height={360} unoptimized />
+                      <Image src={artworkUrl(track.cover)} alt="" width={360} height={360} unoptimized />
                       <span className="card-play">{current.videoId === track.videoId && playing ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}</span>
                       <span className="card-index">♪</span>
                     </button>
@@ -1087,7 +1099,7 @@ export default function HomePage() {
                   <div className="section-heading"><div><p className="eyebrow">Explore by sound</p><h2>{section.title}</h2><span className="section-subtitle">{section.subtitle}</span></div><button onClick={() => setQuery(section.title)}>See all <ChevronRight size={16} /></button></div>
                   <div className="catalog-carousel">
                     {section.tracks.map((track) => <button className="catalog-card" key={`${section.id}-${track.videoId}`} onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => selectTrack(track)}>
-                      <span className="catalog-cover"><Image src={track.cover} alt="" width={220} height={220} unoptimized /><i><Play size={18} fill="currentColor" /></i></span>
+                      <span className="catalog-cover"><Image src={artworkUrl(track.cover)} alt="" width={220} height={220} unoptimized /><i><Play size={18} fill="currentColor" /></i></span>
                       <strong>{track.title}</strong><small>{track.artist}</small><em>{track.album}</em>
                     </button>)}
                   </div>
@@ -1102,7 +1114,7 @@ export default function HomePage() {
                   {recentTracks.slice(0, 4).map((track, index) => (
                     <button className="track-row" key={track.id} onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => selectTrack(track)}>
                       <span className="track-number">{current.videoId === track.videoId && playing ? <span className="playing-bars"><i /><i /><i /></span> : String(index + 1).padStart(2, "0")}</span>
-                      <Image src={track.cover} alt="" width={52} height={52} unoptimized />
+                      <Image src={artworkUrl(track.cover)} alt="" width={52} height={52} unoptimized />
                       <span className="track-title"><strong>{track.title}</strong><small>{track.artist}</small></span>
                       <span className="track-album">{track.album}</span>
                       <span className="track-duration">{track.duration}</span>
@@ -1128,7 +1140,7 @@ export default function HomePage() {
 
         <footer className="player">
           <div className="now-playing">
-            <button className="player-track-open" onClick={() => { setDetailOpen(true); navigate("Browse"); }} aria-label={`Open ${current.title}`}><Image src={current.cover} alt={`${current.title} thumbnail`} width={58} height={58} unoptimized /></button>
+            <button className="player-track-open" onClick={() => { setDetailOpen(true); navigate("Browse"); }} aria-label={`Open ${current.title}`}><Image src={artworkUrl(current.cover)} alt={`${current.title} thumbnail`} width={58} height={58} unoptimized /></button>
             <button className="player-track-copy" onClick={() => { setDetailOpen(true); navigate("Browse"); }}><strong>{current.title}</strong><span>{current.artist}</span>{playerRecovery && <small>Retrying the same recording…</small>}{playerError && <small>This recording is temporarily unavailable</small>}</button>
             <button className={liked.includes(current.id) ? "liked" : ""} onClick={() => toggleLike(current.id)} aria-label="Like current track"><Heart size={18} fill={liked.includes(current.id) ? "currentColor" : "none"} /></button>
             <button className="queue-open-short" onClick={() => setQueueOpen(true)} aria-label={`Open queue with ${upNext.length} songs`}><ListMusic size={18} />{upNext.length > 0 && <i>{upNext.length}</i>}</button>
@@ -1158,7 +1170,7 @@ export default function HomePage() {
               <SheetDescription>{upNext.length ? `${upNext.length} ${upNext.length === 1 ? "song" : "songs"} waiting` : "Add songs or keep autoplay on."}</SheetDescription>
             </SheetHeader>
             <div className="queue-current">
-              <Image src={current.cover} alt="" width={72} height={72} unoptimized />
+              <Image src={artworkUrl(current.cover)} alt="" width={72} height={72} unoptimized />
               <div><span>Now playing</span><strong>{current.title}</strong><small>{current.artist}</small></div>
               {playing ? <span className="playing-bars"><i /><i /><i /></span> : <Play size={18} fill="currentColor" />}
             </div>
@@ -1167,13 +1179,13 @@ export default function HomePage() {
               {upNext.length === 0 && <div className="queue-empty"><ListMusic /><strong>Your queue is empty</strong><span>Use a song menu and choose Play next or Add to queue.</span></div>}
               <div className="queue-list">
                 {upNext.map((track, index) => <article className="queue-row" key={track.videoId}>
-                  <button className="queue-track" onClick={() => playFromQueue(track)}><span>{String(index + 1).padStart(2, "0")}</span><Image src={track.cover} alt="" width={48} height={48} unoptimized /><span><strong>{track.title}</strong><small>{track.artist}</small></span></button>
+                  <button className="queue-track" onClick={() => playFromQueue(track)}><span>{String(index + 1).padStart(2, "0")}</span><Image src={artworkUrl(track.cover)} alt="" width={48} height={48} unoptimized /><span><strong>{track.title}</strong><small>{track.artist}</small></span></button>
                   <div className="queue-actions"><button disabled={index === 0} onClick={() => moveInQueue(index, -1)} aria-label={`Move ${track.title} up`}><ArrowUp /></button><button disabled={index === upNext.length - 1} onClick={() => moveInQueue(index, 1)} aria-label={`Move ${track.title} down`}><ArrowDown /></button><button onClick={() => removeFromQueue(track.videoId)} aria-label={`Remove ${track.title} from queue`}><X /></button></div>
                 </article>)}
               </div>
               <div className="queue-section-heading autoplay-heading"><div><span>Autoplay</span><small>Based on what you are listening to</small></div><Sparkles size={17} /></div>
               <div className="autoplay-list">
-                {autoplayTracks.map((track) => <article className="autoplay-row" key={track.videoId}><button onClick={() => selectTrack(track)}><Image src={track.cover} alt="" width={44} height={44} unoptimized /><span><strong>{track.title}</strong><small>{track.artist}</small></span></button><button onClick={() => addToQueue(track)} aria-label={`Add ${track.title} to queue`}><Plus /></button></article>)}
+                {autoplayTracks.map((track) => <article className="autoplay-row" key={track.videoId}><button onClick={() => selectTrack(track)}><Image src={artworkUrl(track.cover)} alt="" width={44} height={44} unoptimized /><span><strong>{track.title}</strong><small>{track.artist}</small></span></button><button onClick={() => addToQueue(track)} aria-label={`Add ${track.title} to queue`}><Plus /></button></article>)}
               </div>
             </div>
           </SheetContent>

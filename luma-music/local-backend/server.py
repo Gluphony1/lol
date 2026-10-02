@@ -796,6 +796,38 @@ class LumaHandler(BaseHTTPRequestHandler):
             if parsed.path == "/health":
                 self.send_json(200, {"ok": True, "service": "luma-yt-dlp"})
                 return
+            if parsed.path == "/artwork":
+                artwork_url = (query.get("url") or [""])[0].strip()
+                artwork_parts = urllib.parse.urlparse(artwork_url)
+                allowed_hosts = {"yt3.googleusercontent.com", "lh3.googleusercontent.com", "i.ytimg.com"}
+                if artwork_parts.scheme != "https" or artwork_parts.hostname not in allowed_hosts:
+                    self.send_json(400, {"error": "Invalid artwork URL."})
+                    return
+                request = urllib.request.Request(
+                    artwork_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+                        "Referer": "https://music.youtube.com/",
+                    },
+                )
+                with urllib.request.urlopen(request, timeout=15) as response:
+                    final_host = urllib.parse.urlparse(response.geturl()).hostname
+                    if final_host not in allowed_hosts:
+                        raise ValueError("Unexpected artwork redirect")
+                    body = response.read(8 * 1024 * 1024 + 1)
+                    if len(body) > 8 * 1024 * 1024:
+                        raise ValueError("Artwork is too large")
+                    content_type = response.headers.get_content_type()
+                    if not content_type.startswith("image/"):
+                        raise ValueError("Artwork response is not an image")
+                self.send_response(200)
+                self.cors_headers()
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "public, max-age=86400, immutable")
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if parsed.path == "/search":
                 term = (query.get("q") or [""])[0].strip()
                 if not term or len(term) > 160:
