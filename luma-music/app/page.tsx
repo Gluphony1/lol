@@ -283,6 +283,9 @@ export default function HomePage() {
   const scrollAreaRef = useRef<HTMLDivElement | null>(null);
   const lyricsScrollRef = useRef<HTMLDivElement | null>(null);
   const pickedCarouselRef = useRef<HTMLDivElement | null>(null);
+  const artistCarouselRef = useRef<HTMLDivElement | null>(null);
+  const [pickedScroll, setPickedScroll] = useState({ progress: 0, canPrev: false, canNext: true });
+  const [artistScroll, setArtistScroll] = useState({ progress: 0, canPrev: false, canNext: true });
   const lyricLineRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const currentRef = useRef<Track>(current);
   const queueRef = useRef<Track[]>(tracks);
@@ -347,6 +350,13 @@ export default function HomePage() {
     return catalogTracks.length ? catalogTracks : tracks;
   }, [activeNav, catalogSections, libraryTracks, listeningHistory, localFiles, query, recommendations, remoteResults]);
   const recentTracks = listeningHistory.length ? listeningHistory.map((item) => item.track) : tracks;
+  const quickPickTracks = useMemo(() => {
+    const unique = new Map<string, Track>();
+    for (const track of [current, ...recentTracks, ...recommendations, ...catalogSections.flatMap((section) => section.tracks)]) {
+      if (!unique.has(track.videoId)) unique.set(track.videoId, track);
+    }
+    return [...unique.values()].slice(0, 6);
+  }, [catalogSections, current, recentTracks, recommendations]);
   const topArtist = tasteSeeds[0] || current.artist;
   const albumGroups = useMemo(() => {
     const unique = new Map<string, Track>();
@@ -612,10 +622,19 @@ export default function HomePage() {
     setSelectedArtist(null);
     setSelectedAlbum(null);
     setAlbumRelease(null);
-    setDetailOpen(false);
     setActiveNav(destination);
     if (destination === "Albums" || destination === "Radio") setDiscoverySalt(crypto.randomUUID());
     if (destination === "Library" || destination === "Favorite Songs") setSelectedPlaylistId(null);
+  };
+
+  const openNowPlaying = () => {
+    setQuery("");
+    setSelectedArtist(null);
+    setSelectedAlbum(null);
+    setAlbumRelease(null);
+    setActiveNav("Browse");
+    setDetailOpen(true);
+    requestAnimationFrame(() => scrollAreaRef.current?.scrollTo({ top: 0, behavior: "smooth" }));
   };
 
   const openArtist = (artist: string) => {
@@ -661,6 +680,29 @@ export default function HomePage() {
       void loadMoreRecommendations();
     }
   };
+
+  const readCarouselPosition = (element: HTMLDivElement) => {
+    const max = Math.max(0, element.scrollWidth - element.clientWidth);
+    return {
+      progress: max ? Math.min(1, Math.max(0, element.scrollLeft / max)) : 1,
+      canPrev: element.scrollLeft > 4,
+      canNext: element.scrollLeft < max - 4,
+    };
+  };
+
+  const scrollArtists = (direction: -1 | 1) => {
+    const carousel = artistCarouselRef.current;
+    if (!carousel) return;
+    carousel.scrollBy({ left: direction * Math.max(260, carousel.clientWidth * 0.72), behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      if (pickedCarouselRef.current) setPickedScroll(readCarouselPosition(pickedCarouselRef.current));
+      if (artistCarouselRef.current) setArtistScroll(readCarouselPosition(artistCarouselRef.current));
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [activeNav, detailOpen, popularArtists.length, recommendations.length]);
 
   const startRadio = async (seedTrack: Track) => {
     setShuffleEnabled(true);
@@ -1059,17 +1101,18 @@ export default function HomePage() {
 
         <main className="content">
           <header className="topbar">
-            <label className="search-box">
-              <Search size={18} />
-              <input value={query} onChange={(event) => { setSelectedArtist(null); setSelectedAlbum(null); setAlbumRelease(null); setQuery(event.target.value); }} placeholder="Search songs, artists or albums" aria-label="Search music" />
-              <kbd title="Focus search with Ctrl+K">Ctrl K</kbd>
-            </label>
+            <div className={query ? "search-box has-query" : "search-box"}>
+              <Search size={18} aria-hidden="true" />
+              <input value={query} onChange={(event) => { setSelectedArtist(null); setSelectedAlbum(null); setAlbumRelease(null); setQuery(event.target.value); }} placeholder="Search songs, albums, artists…" aria-label="Search music" />
+              {query ? <button className="search-clear" onClick={() => setQuery("")} aria-label="Clear search"><X size={15} /></button> : <kbd title="Focus search with Ctrl+K">Ctrl K</kbd>}
+            </div>
             <nav className="browse-tabs" aria-label="Browse shortcuts">
               <button onClick={() => navigate("Albums")}>New Releases</button>
               <button onClick={() => navigate("Browse")}>New Feed</button>
               <button onClick={playShuffle}><Shuffle size={14} /> Shuffle Play</button>
             </nav>
             <div className="top-actions">
+              {activeNav !== "Browse" && detailOpen && <button className={playing ? "resume-playing is-playing" : "resume-playing"} onClick={openNowPlaying}><span aria-hidden="true"><i /><i /><i /></span><span>Now playing</span></button>}
               <Button className="upgrade-button" onClick={handleInstall}><Download /> Install app</Button>
               <Popover>
                 <PopoverTrigger asChild><button className="icon-button notification-button" aria-label="Notifications"><Bell size={18} />{!notificationsRead && <i />}</button></PopoverTrigger>
@@ -1154,9 +1197,28 @@ export default function HomePage() {
 
             {!query && activeNav === "Browse" && !detailOpen && (
               <section className="popular-artists section-block" aria-label="Popular artists">
-                <div className="section-heading"><div><p className="eyebrow">Artists for you</p><h2>Popular artists</h2></div><button onClick={() => navigate("Artists")}>See all <ChevronRight size={16} /></button></div>
-                <div className="artist-carousel">
-                  {popularArtists.slice(0, 8).map((track) => <button key={track.artist} className="artist-bubble" onClick={() => openArtist(track.artist)}><Image src={artworkUrl(track.cover)} alt="" width={112} height={112} unoptimized /><strong>{track.artist}</strong><span>Artist</span></button>)}
+                <div className="section-heading carousel-heading"><div><h2>Popular artists</h2><p>Artists growing from your recent listening.</p></div><span>Swipe or use the arrows</span></div>
+                <div className="carousel-frame artist-carousel-frame">
+                  <button className="carousel-arrow previous" onClick={() => scrollArtists(-1)} disabled={!artistScroll.canPrev} aria-label="Previous artists"><ChevronLeft /></button>
+                  <div ref={artistCarouselRef} className="artist-carousel" onScroll={(event) => setArtistScroll(readCarouselPosition(event.currentTarget))}>
+                    {popularArtists.map((track) => <button key={track.artist} className="artist-bubble" onClick={() => openArtist(track.artist)}><Image src={artworkUrl(track.cover)} alt="" width={112} height={112} unoptimized /><strong>{track.artist}</strong><span>Artist</span></button>)}
+                  </div>
+                  <button className="carousel-arrow next" onClick={() => scrollArtists(1)} disabled={!artistScroll.canNext} aria-label="More artists"><ChevronRight /></button>
+                </div>
+                <div className="carousel-footer"><span className="carousel-progress" aria-hidden="true"><i style={{ "--carousel-progress": artistScroll.progress } as React.CSSProperties} /></span><button onClick={() => navigate("Artists")}>Explore artists <ChevronRight size={15} /></button></div>
+              </section>
+            )}
+
+            {!query && activeNav === "Browse" && !detailOpen && (
+              <section className="quick-picks section-block" aria-label="Quick picks">
+                <div className="section-heading"><div><h2>Quick picks</h2><p>Six familiar songs, ready without leaving Browse.</p></div><button onClick={playShuffle}><Shuffle size={14} /> Start a mix</button></div>
+                <div className="quick-picks-grid">
+                  {quickPickTracks.map((track, index) => <button key={`quick-${track.videoId}`} className={current.videoId === track.videoId ? "quick-pick active" : "quick-pick"} onClick={() => selectTrack(track)} onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)}>
+                    <span className="quick-index">{String(index + 1).padStart(2, "0")}</span>
+                    <Image src={artworkUrl(track.cover)} alt="" width={58} height={58} unoptimized />
+                    <span><strong>{track.title}</strong><small>{track.artist}</small></span>
+                    <Play size={16} fill="currentColor" />
+                  </button>)}
                 </div>
               </section>
             )}
@@ -1254,8 +1316,10 @@ export default function HomePage() {
             )}
 
             {!selectedArtist && !selectedAlbum && (query || !["Albums", "Artists", "Radio"].includes(activeNav)) && <section className="section-block recommendations-section">
-              <div className="section-heading recommendation-heading"><div><h2>{query ? "Songs" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Recently Played" ? "Recently played" : activeNav === "Local Files" ? "Local songs" : activeNav === "Songs" ? "Songs picked for you" : "Picked for you"}</h2><p>{query ? "Only music releases matching your search." : activeNav === "Library" || activeNav === "Favorite Songs" ? "The music you chose to keep close." : activeNav === "Recently Played" ? "Continue from where you left off." : activeNav === "Local Files" ? "Private tracks stored on this device." : recommendations.length ? "A growing mix shaped by what you actually play." : "Play a few songs and Luma will learn your taste."}</p></div>{!query && ["Browse", "Songs"].includes(activeNav) && <div className="carousel-controls"><span>{moreRecommendationsLoading ? "Finding more…" : "More like what you play"}</span><button onClick={() => scrollPicked(-1)} aria-label="Scroll recommendations left"><ChevronLeft /></button><button onClick={() => scrollPicked(1)} aria-label="Scroll recommendations right"><ChevronRight /></button></div>}</div>
-              <div ref={!query && ["Browse", "Songs"].includes(activeNav) ? pickedCarouselRef : undefined} className={query ? "album-grid search-grid" : "album-carousel"} onScroll={(event) => { const element = event.currentTarget; if (!query && element.scrollWidth - element.scrollLeft - element.clientWidth < element.clientWidth) void loadMoreRecommendations(); }}>
+              <div className="section-heading recommendation-heading"><div><h2>{query ? "Songs" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Recently Played" ? "Recently played" : activeNav === "Local Files" ? "Local songs" : activeNav === "Songs" ? "Songs picked for you" : "Picked for you"}</h2><p>{query ? "Only music releases matching your search." : activeNav === "Library" || activeNav === "Favorite Songs" ? "The music you chose to keep close." : activeNav === "Recently Played" ? "Continue from where you left off." : activeNav === "Local Files" ? "Private tracks stored on this device." : recommendations.length ? "A growing mix shaped by what you actually play." : "Play a few songs and Luma will learn your taste."}</p></div>{!query && ["Browse", "Songs"].includes(activeNav) && <span className="recommendation-status">{moreRecommendationsLoading ? "Finding more…" : `${results.length} songs in your mix`}</span>}</div>
+              <div className={!query && ["Browse", "Songs"].includes(activeNav) ? "carousel-frame recommendation-frame" : undefined}>
+              {!query && ["Browse", "Songs"].includes(activeNav) && <button className="carousel-arrow previous" onClick={() => scrollPicked(-1)} disabled={!pickedScroll.canPrev} aria-label="Previous recommendations"><ChevronLeft /></button>}
+              <div ref={!query && ["Browse", "Songs"].includes(activeNav) ? pickedCarouselRef : undefined} className={query ? "album-grid search-grid" : "album-carousel"} onScroll={(event) => { const element = event.currentTarget; setPickedScroll(readCarouselPosition(element)); if (!query && element.scrollWidth - element.scrollLeft - element.clientWidth < element.clientWidth) void loadMoreRecommendations(); }}>
                 {results.slice(0, query ? 18 : ["Browse", "Songs"].includes(activeNav) ? 60 : 30).map((track) => (
                   <article className={current.videoId === track.videoId ? `album-card selected${playing ? " is-playing" : ""}` : "album-card"} key={track.id}>
                     <button className="cover-button" onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => selectTrack(track)} aria-label={`Play ${track.title} by ${track.artist}`}>
@@ -1285,6 +1349,9 @@ export default function HomePage() {
                   </article>
                 ))}
               </div>
+              {!query && ["Browse", "Songs"].includes(activeNav) && <button className="carousel-arrow next" onClick={() => scrollPicked(1)} disabled={!pickedScroll.canNext} aria-label="More recommendations"><ChevronRight /></button>}
+              </div>
+              {!query && ["Browse", "Songs"].includes(activeNav) && <div className="carousel-footer recommendation-footer"><span className="carousel-progress" aria-hidden="true"><i style={{ "--carousel-progress": pickedScroll.progress } as React.CSSProperties} /></span><span>More music is added as you explore</span></div>}
               {searching && <div className="empty-state"><Search /><h3>Finding songs…</h3><p>Filtering out interviews, reactions and unrelated videos.</p></div>}
               {!searching && results.length === 0 && <div className="empty-state">{(activeNav === "Library" || activeNav === "Favorite Songs") && !query ? <Heart /> : activeNav === "Local Files" ? <FileAudio /> : <Search />}<h3>{searchError ? "Local audio service unavailable" : activeNav === "Local Files" ? "No local music yet" : (activeNav === "Library" || activeNav === "Favorite Songs") && !query ? selectedPlaylist ? "This playlist is empty" : "Your favorite songs are empty" : "No songs found"}</h3><p>{searchError || (activeNav === "Local Files" ? "Add audio files from this device to play them in Luma." : (activeNav === "Library" || activeNav === "Favorite Songs") && !query ? selectedPlaylist ? "Use the playlist button on any song to add it here." : "Like a song and it will appear here." : "Try another song or artist.")}</p><Button onClick={() => (activeNav === "Library" || activeNav === "Favorite Songs") && !query ? navigate("Browse") : setQuery("")}>{(activeNav === "Library" || activeNav === "Favorite Songs") && !query ? "Browse music" : "Clear search"}</Button></div>}
             </section>}
