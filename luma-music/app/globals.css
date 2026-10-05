@@ -1643,3 +1643,25 @@ button, a, [role="button"], label[for] {
   .nav-item.active::after, .side-link.active::after { animation: none; }
   .sidebar-create-playlist, .songs-shuffle, .profile-accent-field button { transition-duration: 0ms; }
 }
+
+/* Dense library views use a vertical collection instead of a sideways shelf. */
+.songs-grid {
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 28px 18px;
+  overflow: visible;
+}
+.release-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 26px 18px;
+}
+.release-grid .catalog-card { width: 100%; min-width: 0; }
+.history-divider { margin-top: 8px; }
+.history-suggestion { background: color-mix(in srgb, #7568c9 6%, transparent); }
+.history-suggestion > svg { color: #6651b7; opacity: .7; }
+.history-list { padding-bottom: 10px; border-bottom: 1px solid #211c1812; }
+.history-heading > svg { color: #7568c9; }
+
+@media (max-width: 820px) {
+  .songs-grid, .release-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px 12px; }
+}

@@ -10,6 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 import yt_dlp
@@ -18,6 +19,13 @@ from ytmusicapi import YTMusic
 
 HOST = os.environ.get("LUMA_HOST", "127.0.0.1")
 PORT = int(os.environ.get("LUMA_PORT", "8765"))
+PROFILE_PATH = Path(__file__).with_name("luma-profile.local.json")
+PROFILE_KEYS = {
+    "liked", "likedTracks", "current", "volume", "listeningHistory",
+    "playbackHistory", "historyCursor", "playlists", "profileName",
+    "profileAccent", "notificationsRead", "upNext",
+}
+PROFILE_MAX_BYTES = 1024 * 1024
 VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 ALLOWED_ORIGINS = {
     "http://localhost:5173",
@@ -90,6 +98,7 @@ _rate_hits: dict[str, list[float]] = {}
 _cache_lock = threading.Lock()
 _rate_lock = threading.Lock()
 _resolve_locks: dict[str, threading.Lock] = {}
+_profile_lock = threading.Lock()
 _ytmusic = YTMusic()
 
 CATALOG_ROWS = (
@@ -187,14 +196,52 @@ def duration_seconds(value: Any) -> int:
     return total
 
 
+def high_resolution_artwork_url(url: str) -> str:
+    try:
+        hostname = urllib.parse.urlparse(url).hostname or ""
+    except ValueError:
+        return url
+    if hostname in {"yt3.googleusercontent.com", "lh3.googleusercontent.com"}:
+        if re.search(r"=w\d+-h\d+[^?]*$", url):
+            return re.sub(r"=w\d+-h\d+[^?]*$", "=w1200-h1200-l90-rj", url)
+        return f"{url}=w1200-h1200-l90-rj"
+    if hostname == "i.ytimg.com":
+        return re.sub(r"/(?:default|mqdefault|hqdefault|sddefault)\.jpg$", "/maxresdefault.jpg", url)
+    return url
+
+
 def best_thumbnail(entry: dict[str, Any]) -> str:
     thumbnails = entry.get("thumbnails") or entry.get("thumbnail") or []
     if isinstance(thumbnails, list):
         for image in reversed(thumbnails):
             if isinstance(image, dict) and image.get("url"):
-                return str(image["url"])
+                return high_resolution_artwork_url(str(image["url"]))
     video_id = str(entry.get("videoId") or entry.get("id") or "")
-    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+    return f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg"
+
+
+def read_profile() -> dict[str, Any]:
+    with _profile_lock:
+        try:
+            if not PROFILE_PATH.exists() or PROFILE_PATH.stat().st_size > PROFILE_MAX_BYTES:
+                return {}
+            payload = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return {}
+            return {key: value for key, value in payload.items() if key in PROFILE_KEYS}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+
+def write_profile(payload: dict[str, Any]) -> None:
+    clean = {key: value for key, value in payload.items() if key in PROFILE_KEYS}
+    encoded = json.dumps(clean, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > PROFILE_MAX_BYTES:
+        raise ValueError("Profile is too large")
+    temp_path = PROFILE_PATH.with_suffix(".tmp")
+    with _profile_lock:
+        temp_path.write_bytes(encoded)
+        temp_path.replace(PROFILE_PATH)
 
 
 def music_catalog_track(entry: dict[str, Any], reason: str | None = None, album_only: bool = False) -> dict[str, Any] | None:
@@ -815,7 +862,7 @@ class LumaHandler(BaseHTTPRequestHandler):
         if origin and origin_allowed(origin):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Range, Content-Type")
         self.send_header(
             "Access-Control-Expose-Headers",
@@ -840,6 +887,34 @@ class LumaHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def do_POST(self) -> None:
+        origin = self.headers.get("Origin")
+        if not origin_allowed(origin):
+            self.send_json(403, {"error": "Origin not allowed."})
+            return
+        if not request_allowed(self.client_address[0]):
+            self.send_json(429, {"error": "Too many requests. Try again shortly."})
+            return
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path != "/profile":
+            self.send_json(404, {"error": "Not found."})
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            content_length = 0
+        if content_length <= 0 or content_length > PROFILE_MAX_BYTES:
+            self.send_json(413, {"error": "Invalid profile size."})
+            return
+        try:
+            payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("Profile must be an object")
+            write_profile(payload)
+            self.send_json(200, {"ok": True})
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, OSError):
+            self.send_json(400, {"error": "Invalid profile data."})
+
     def do_GET(self) -> None:
         origin = self.headers.get("Origin")
         if not origin_allowed(origin):
@@ -857,6 +932,9 @@ class LumaHandler(BaseHTTPRequestHandler):
             if parsed.path == "/health":
                 self.send_json(200, {"ok": True, "service": "luma-yt-dlp"})
                 return
+            if parsed.path == "/profile":
+                self.send_json(200, {"profile": read_profile()})
+                return
             if parsed.path == "/artwork":
                 artwork_url = (query.get("url") or [""])[0].strip()
                 artwork_parts = urllib.parse.urlparse(artwork_url)
@@ -864,23 +942,35 @@ class LumaHandler(BaseHTTPRequestHandler):
                 if artwork_parts.scheme != "https" or artwork_parts.hostname not in allowed_hosts:
                     self.send_json(400, {"error": "Invalid artwork URL."})
                     return
-                request = urllib.request.Request(
-                    artwork_url,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-                        "Referer": "https://music.youtube.com/",
-                    },
-                )
-                with urllib.request.urlopen(request, timeout=15) as response:
-                    final_host = urllib.parse.urlparse(response.geturl()).hostname
-                    if final_host not in allowed_hosts:
-                        raise ValueError("Unexpected artwork redirect")
-                    body = response.read(8 * 1024 * 1024 + 1)
-                    if len(body) > 8 * 1024 * 1024:
-                        raise ValueError("Artwork is too large")
-                    content_type = response.headers.get_content_type()
-                    if not content_type.startswith("image/"):
-                        raise ValueError("Artwork response is not an image")
+                upgraded_url = high_resolution_artwork_url(artwork_url)
+                candidates = [upgraded_url]
+                if "/maxresdefault.jpg" in upgraded_url:
+                    candidates.append(upgraded_url.replace("/maxresdefault.jpg", "/hqdefault.jpg"))
+                last_error: Exception | None = None
+                for candidate in dict.fromkeys(candidates):
+                    try:
+                        request = urllib.request.Request(
+                            candidate,
+                            headers={
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+                                "Referer": "https://music.youtube.com/",
+                            },
+                        )
+                        with urllib.request.urlopen(request, timeout=15) as response:
+                            final_host = urllib.parse.urlparse(response.geturl()).hostname
+                            if final_host not in allowed_hosts:
+                                raise ValueError("Unexpected artwork redirect")
+                            body = response.read(8 * 1024 * 1024 + 1)
+                            if len(body) > 8 * 1024 * 1024:
+                                raise ValueError("Artwork is too large")
+                            content_type = response.headers.get_content_type()
+                            if not content_type.startswith("image/"):
+                                raise ValueError("Artwork response is not an image")
+                        break
+                    except (urllib.error.HTTPError, urllib.error.URLError, ValueError) as error:
+                        last_error = error
+                else:
+                    raise last_error or ValueError("Artwork unavailable")
                 self.send_response(200)
                 self.cors_headers()
                 self.send_header("Content-Type", content_type)

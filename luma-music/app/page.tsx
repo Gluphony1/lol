@@ -137,6 +137,21 @@ type Viewer = {
   email: string;
 };
 
+type SavedProfile = {
+  liked?: string[];
+  likedTracks?: Track[];
+  current?: Track;
+  volume?: number;
+  listeningHistory?: ListeningRecord[];
+  playbackHistory?: Track[];
+  historyCursor?: number;
+  playlists?: Playlist[];
+  profileName?: string;
+  profileAccent?: string;
+  notificationsRead?: boolean;
+  upNext?: Track[];
+};
+
 type InstallPromptEvent = Event & {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
@@ -162,17 +177,18 @@ const tracks: Track[] = [
   { id: "eVli-tstM5E", title: "Espresso", artist: "Sabrina Carpenter", album: "Short n' Sweet", cover: "https://i.ytimg.com/vi/eVli-tstM5E/hqdefault.jpg", color: "#22d3ee", duration: "3:21", videoId: "eVli-tstM5E" },
 ];
 
-const LOCAL_AUDIO_API = typeof window !== "undefined" && !["127.0.0.1", "localhost"].includes(window.location.hostname)
+const localAudioApi = () => typeof window !== "undefined" && !["127.0.0.1", "localhost"].includes(window.location.hostname)
   ? `${window.location.protocol}//${window.location.hostname}:8765`
   : "http://127.0.0.1:8765";
 const resultColors = ["#ff5ca8", "#60a5fa", "#a78bfa", "#fb7185", "#818cf8", "#22d3ee"];
 const profileColors = ["#6f66df", "#bc5d3f", "#397a70", "#9a6b24", "#805475"];
 const artworkUrl = (cover: string) => {
   if (!cover.startsWith("https://")) return cover;
+  if (typeof window === "undefined") return cover;
   try {
     const hostname = new URL(cover).hostname;
     if (["yt3.googleusercontent.com", "lh3.googleusercontent.com", "i.ytimg.com"].includes(hostname)) {
-      return `${LOCAL_AUDIO_API}/artwork?url=${encodeURIComponent(cover)}`;
+      return `${localAudioApi()}/artwork?url=${encodeURIComponent(cover)}`;
     }
   } catch {
     return "/icon-192.png";
@@ -284,6 +300,8 @@ export default function HomePage() {
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [discoverySalt, setDiscoverySalt] = useState("initial");
   const [listeningHistory, setListeningHistory] = useState<ListeningRecord[]>([]);
+  const [playbackHistory, setPlaybackHistory] = useState<Track[]>([tracks[0]]);
+  const [historyCursor, setHistoryCursor] = useState(0);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searchFocused, setSearchFocused] = useState(false);
@@ -307,6 +325,8 @@ export default function HomePage() {
   const autoplayPlayedRef = useRef<Set<string>>(new Set());
   const suggestionCacheRef = useRef<Map<string, Track[]>>(new Map());
   const upNextRef = useRef<Track[]>([]);
+  const playbackHistoryRef = useRef<Track[]>([tracks[0]]);
+  const historyCursorRef = useRef(0);
   const selectTrackRef = useRef<(track: Track) => void>(() => undefined);
   const playingRef = useRef(false);
   const viewerName = profileName || viewer?.displayName || "Luma listener";
@@ -445,6 +465,19 @@ export default function HomePage() {
     }
     return [...unique.values()].slice(0, 10);
   }, [autoplayTracks, current.videoId, upNext]);
+  const previousSessionTracks = useMemo(() => {
+    const seen = new Set<string>();
+    return playbackHistory
+      .map((track, index) => ({ track, index }))
+      .slice(0, Math.max(0, historyCursor))
+      .reverse()
+      .filter(({ track }) => {
+        if (track.videoId === current.videoId || seen.has(track.videoId)) return false;
+        seen.add(track.videoId);
+        return true;
+      })
+      .slice(0, 6);
+  }, [current.videoId, historyCursor, playbackHistory]);
   const activeLyricIndex = useMemo(() => {
     let active = -1;
     for (let index = 0; index < lyrics.length; index += 1) {
@@ -468,11 +501,21 @@ export default function HomePage() {
     centerActiveLyric("smooth");
   }, [activeLyricIndex, centerActiveLyric, lyricsFollowEnabled]);
 
-  const selectTrack = useCallback((track: Track) => {
+  const selectTrack = useCallback((track: Track, historyMode: "push" | "history" = "push") => {
     const audio = audioRef.current;
+    if (historyMode === "push" && track.videoId !== currentRef.current.videoId) {
+      const branch = playbackHistoryRef.current.slice(0, historyCursorRef.current + 1);
+      const next = [...branch, track].slice(-50);
+      playbackHistoryRef.current = next;
+      historyCursorRef.current = next.length - 1;
+      setPlaybackHistory(next);
+      setHistoryCursor(next.length - 1);
+    }
     recoveryAttemptedRef.current.delete(track.videoId);
     setCurrent(track);
     currentRef.current = track;
+    setTrackSuggestions(suggestionCacheRef.current.get(track.videoId) || []);
+    setSuggestionsLoading(true);
     setProgress(0);
     setDurationSeconds(0);
     setPlayerError(false);
@@ -490,7 +533,7 @@ export default function HomePage() {
       return next.sort((a, b) => b.lastPlayed - a.lastPlayed).slice(0, 60);
     });
     if (!audio) return;
-    audio.src = track.localUrl || `${LOCAL_AUDIO_API}/stream?id=${encodeURIComponent(track.videoId)}`;
+    audio.src = track.localUrl || `${localAudioApi()}/stream?id=${encodeURIComponent(track.videoId)}`;
     audio.load();
     void audio.play().catch(() => setPlayerError(true));
   }, []);
@@ -528,6 +571,24 @@ export default function HomePage() {
   }, [commitUpNext]);
 
   const stepTrack = useCallback((direction: number) => {
+    if (direction < 0) {
+      const previousIndex = historyCursorRef.current - 1;
+      const previous = playbackHistoryRef.current[previousIndex];
+      if (previous) {
+        historyCursorRef.current = previousIndex;
+        setHistoryCursor(previousIndex);
+        selectTrack(previous, "history");
+      }
+      return;
+    }
+    const forwardIndex = historyCursorRef.current + 1;
+    const forward = playbackHistoryRef.current[forwardIndex];
+    if (forward) {
+      historyCursorRef.current = forwardIndex;
+      setHistoryCursor(forwardIndex);
+      selectTrack(forward, "history");
+      return;
+    }
     if (direction > 0 && upNextRef.current.length) {
       const [next, ...rest] = upNextRef.current;
       commitUpNext(rest);
@@ -554,6 +615,12 @@ export default function HomePage() {
       : ((index < 0 ? 0 : index) + direction + queue.length) % queue.length;
     selectTrack(queue[nextIndex]);
   }, [autoplayTracks, commitUpNext, selectTrack, shuffleEnabled]);
+
+  const jumpToHistory = useCallback((track: Track, index: number) => {
+    historyCursorRef.current = index;
+    setHistoryCursor(index);
+    selectTrack(track, "history");
+  }, [selectTrack]);
 
   const togglePlayback = useCallback(() => {
     const audio = audioRef.current;
@@ -586,14 +653,14 @@ export default function HomePage() {
     setPlayerRecovery(true);
     setPlayerError(false);
     try {
-      const response = await fetch(`${LOCAL_AUDIO_API}/refresh?id=${encodeURIComponent(failed.videoId)}`);
+      const response = await fetch(`${localAudioApi()}/refresh?id=${encodeURIComponent(failed.videoId)}`);
       if (!response.ok || !audio) throw new Error("The selected recording is unavailable");
       audio.addEventListener("loadedmetadata", () => {
         if (resumeAt > 0 && Number.isFinite(audio.duration)) {
           audio.currentTime = Math.min(resumeAt, Math.max(0, audio.duration - 1));
         }
       }, { once: true });
-      audio.src = `${LOCAL_AUDIO_API}/stream?id=${encodeURIComponent(failed.videoId)}&retry=${Date.now()}`;
+      audio.src = `${localAudioApi()}/stream?id=${encodeURIComponent(failed.videoId)}&retry=${Date.now()}`;
       audio.load();
       await audio.play();
       setPlayerRecovery(false);
@@ -618,7 +685,7 @@ export default function HomePage() {
     if (track.localUrl) return;
     if (warmedTracksRef.current.has(track.videoId)) return;
     warmedTracksRef.current.add(track.videoId);
-    void fetch(`${LOCAL_AUDIO_API}/prepare?id=${encodeURIComponent(track.videoId)}`)
+    void fetch(`${localAudioApi()}/prepare?id=${encodeURIComponent(track.videoId)}`)
       .then((response) => { if (!response.ok) warmedTracksRef.current.delete(track.videoId); })
       .catch(() => warmedTracksRef.current.delete(track.videoId));
   }, []);
@@ -631,8 +698,13 @@ export default function HomePage() {
     setSelectedPlaylistId(playlist.id);
     setPlaylistName("");
     setPlaylistOpen(false);
+    setSelectedArtist(null);
+    setSelectedAlbum(null);
+    setAlbumRelease(null);
+    setDetailOpen(false);
     setActiveNav("Library");
     setQuery("");
+    requestAnimationFrame(() => scrollAreaRef.current?.scrollTo({ top: 0, behavior: "smooth" }));
   };
 
   const togglePlaylistTrack = (playlistId: string, track: Track) => {
@@ -749,7 +821,7 @@ export default function HomePage() {
     const seedIds = tasteSeedTracks.map((track) => track.videoId).join(",") || current.videoId;
     const excluded = [...new Set([current.videoId, ...recommendations.map((track) => track.videoId)])].slice(-100).join(",");
     try {
-      const response = await fetch(`${LOCAL_AUDIO_API}/recommend?seed=${encodeURIComponent(seed)}&seedId=${encodeURIComponent(seedIds)}&exclude=${encodeURIComponent(excluded)}`);
+      const response = await fetch(`${localAudioApi()}/recommend?seed=${encodeURIComponent(seed)}&seedId=${encodeURIComponent(seedIds)}&exclude=${encodeURIComponent(excluded)}`);
       const payload = await response.json() as { tracks?: ApiTrack[] };
       if (!response.ok) throw new Error("Recommendations unavailable");
       const incoming = mapApiTracks(payload.tracks || []);
@@ -796,7 +868,7 @@ export default function HomePage() {
   const startRadio = async (seedTrack: Track) => {
     setShuffleEnabled(true);
     try {
-      const response = await fetch(`${LOCAL_AUDIO_API}/recommend?seed=${encodeURIComponent(seedTrack.artist)}&seedId=${encodeURIComponent(seedTrack.videoId)}&exclude=${encodeURIComponent(seedTrack.videoId)}`);
+      const response = await fetch(`${localAudioApi()}/recommend?seed=${encodeURIComponent(seedTrack.artist)}&seedId=${encodeURIComponent(seedTrack.videoId)}&exclude=${encodeURIComponent(seedTrack.videoId)}`);
       const payload = await response.json() as { tracks?: ApiTrack[] };
       if (response.ok) {
         const stationTracks = mapApiTracks(payload.tracks || []).filter((track) => track.videoId !== seedTrack.videoId);
@@ -842,16 +914,16 @@ export default function HomePage() {
 
   useEffect(() => {
     let mounted = true;
-    queueMicrotask(() => {
-      if (!mounted) return;
+    const applySavedProfile = (saved: SavedProfile | null) => {
+      if (!mounted || !saved) return;
       try {
-        const saved = JSON.parse(localStorage.getItem("luma-profile") || "null") as { liked?: string[]; likedTracks?: Track[]; current?: Track; volume?: number; listeningHistory?: ListeningRecord[]; playlists?: Playlist[]; profileName?: string; profileAccent?: string; notificationsRead?: boolean; upNext?: Track[] } | null;
         if (saved?.liked?.every((id) => typeof id === "string")) setLiked(saved.liked);
         if (Array.isArray(saved?.likedTracks)) setSavedLikedTracks(saved.likedTracks.map(normalizeSavedTrack));
+        let restoredCurrent = currentRef.current;
         if (saved?.current && typeof saved.current.videoId === "string" && typeof saved.current.title === "string") {
-          const restored = normalizeSavedTrack(saved.current);
-          setCurrent(restored);
-          currentRef.current = restored;
+          restoredCurrent = normalizeSavedTrack(saved.current);
+          setCurrent(restoredCurrent);
+          currentRef.current = restoredCurrent;
         }
         if (typeof saved?.volume === "number" && saved.volume >= 0 && saved.volume <= 100) setVolume(saved.volume);
         if (typeof saved?.profileName === "string") {
@@ -877,19 +949,46 @@ export default function HomePage() {
             .map((item) => ({ ...item, track: normalizeSavedTrack(item.track) }))
             .slice(0, 60));
         }
+        const restoredPlaybackHistory = Array.isArray(saved.playbackHistory)
+          ? saved.playbackHistory.filter((track) => track?.videoId && track?.title).map(normalizeSavedTrack).slice(-50)
+          : [];
+        const sessionHistory = restoredPlaybackHistory.length ? restoredPlaybackHistory : [restoredCurrent];
+        const sessionCursor = Math.min(Math.max(0, Number(saved.historyCursor) || sessionHistory.length - 1), sessionHistory.length - 1);
+        playbackHistoryRef.current = sessionHistory;
+        historyCursorRef.current = sessionCursor;
+        setHistoryCursor(sessionCursor);
+        setPlaybackHistory(sessionHistory);
       } catch {
-        localStorage.removeItem("luma-profile");
+        // A malformed remote profile must not erase the valid local fallback.
       }
-      setProfileReady(true);
-    });
+    };
+    try {
+      applySavedProfile(JSON.parse(localStorage.getItem("luma-profile") || "null") as SavedProfile | null);
+    } catch {
+      localStorage.removeItem("luma-profile");
+    }
+    const profileController = new AbortController();
+    const profileTimeout = window.setTimeout(() => profileController.abort(), 2500);
+    void fetch(`${localAudioApi()}/profile`, { cache: "no-store", signal: profileController.signal })
+      .then(async (response) => response.ok ? response.json() as Promise<{ profile?: SavedProfile }> : null)
+      .then((payload) => {
+        if (payload?.profile && Object.keys(payload.profile).length) applySavedProfile(payload.profile);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        window.clearTimeout(profileTimeout);
+        if (mounted) setProfileReady(true);
+      });
     void fetch("/api/me", { cache: "no-store" })
       .then((response) => response.ok ? response.json() as Promise<{ user: Viewer | null }> : null)
       .then((payload) => setViewer(payload?.user ?? null))
       .catch(() => setViewer(null));
-    void fetch(`${LOCAL_AUDIO_API}/health`)
+    void fetch(`${localAudioApi()}/health`)
       .then((response) => setBackendReady(response.ok))
       .catch(() => setBackendReady(false));
-    if ("serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js");
+    if ("serviceWorker" in navigator) {
+      void navigator.serviceWorker.register("/sw.js", { updateViaCache: "none" }).then((registration) => registration.update());
+    }
     const captureInstall = (event: Event) => {
       event.preventDefault();
       setInstallPrompt(event as InstallPromptEvent);
@@ -908,6 +1007,8 @@ export default function HomePage() {
     window.addEventListener("keydown", focusSearch);
     return () => {
       mounted = false;
+      profileController.abort();
+      window.clearTimeout(profileTimeout);
       window.removeEventListener("beforeinstallprompt", captureInstall);
       window.removeEventListener("keydown", focusSearch);
     };
@@ -932,7 +1033,7 @@ export default function HomePage() {
       }
       setSearching(true);
       setSearchError(null);
-      void fetch(`${LOCAL_AUDIO_API}/search?q=${encodeURIComponent(term)}`, { signal: controller.signal })
+      void fetch(`${localAudioApi()}/search?q=${encodeURIComponent(term)}`, { signal: controller.signal })
         .then(async (response) => {
           const payload = await response.json() as { tracks?: ApiTrack[]; artists?: SearchEntity[]; albums?: SearchEntity[]; error?: string };
           if (!response.ok) throw new Error(payload.error || "Search failed.");
@@ -963,7 +1064,7 @@ export default function HomePage() {
     if (!profileReady || !backendReady || catalogSections.length) return;
     const controller = new AbortController();
     queueMicrotask(() => setCatalogLoading(true));
-    void fetch(`${LOCAL_AUDIO_API}/catalog`, { signal: controller.signal })
+    void fetch(`${localAudioApi()}/catalog`, { signal: controller.signal })
       .then(async (response) => {
         const payload = await response.json() as { sections?: Array<{ id: string; title: string; subtitle: string; tracks?: ApiTrack[] }> };
         if (!response.ok) throw new Error("Catalog unavailable");
@@ -987,7 +1088,7 @@ export default function HomePage() {
     if (!selectedAlbum?.id || !backendReady) return;
     const controller = new AbortController();
     queueMicrotask(() => setAlbumLoading(true));
-    void fetch(`${LOCAL_AUDIO_API}/album?id=${encodeURIComponent(selectedAlbum.id)}`, { signal: controller.signal })
+    void fetch(`${localAudioApi()}/album?id=${encodeURIComponent(selectedAlbum.id)}`, { signal: controller.signal })
       .then(async (response) => {
         const payload = await response.json() as Omit<AlbumRelease, "tracks"> & { tracks?: ApiTrack[] };
         if (!response.ok) throw new Error("Album unavailable");
@@ -1016,7 +1117,7 @@ export default function HomePage() {
     });
 
     const lyricParams = new URLSearchParams({ id: current.videoId, title: current.title, artist: current.artist, duration: String(Math.round(timelineDuration || 0)) });
-    void fetch(`${LOCAL_AUDIO_API}/lyrics?${lyricParams.toString()}`, { signal: lyricsController.signal })
+    void fetch(`${localAudioApi()}/lyrics?${lyricParams.toString()}`, { signal: lyricsController.signal })
       .then(async (response) => {
         const payload = await response.json() as { lines?: LyricLine[]; language?: string; error?: string };
         if (!response.ok) throw new Error(payload.error || "Lyrics unavailable.");
@@ -1030,7 +1131,7 @@ export default function HomePage() {
         if (!lyricsController.signal.aborted) setLyricsLoading(false);
       });
 
-    void fetch(`${LOCAL_AUDIO_API}/recommend?seed=${encodeURIComponent(current.artist)}&seedId=${encodeURIComponent(current.videoId)}&exclude=${encodeURIComponent(current.videoId)}`, { signal: suggestionsController.signal })
+    void fetch(`${localAudioApi()}/recommend?seed=${encodeURIComponent(current.artist)}&seedId=${encodeURIComponent(current.videoId)}&exclude=${encodeURIComponent(current.videoId)}`, { signal: suggestionsController.signal })
       .then(async (response) => {
         const payload = await response.json() as { tracks?: ApiTrack[]; error?: string };
         if (!response.ok) throw new Error(payload.error || "Suggestions unavailable.");
@@ -1065,7 +1166,7 @@ export default function HomePage() {
       .filter((videoId, index, items) => items.indexOf(videoId) === index)
       .slice(0, 40)
       .join(",");
-    void fetch(`${LOCAL_AUDIO_API}/recommend?seed=${encodeURIComponent(seed)}&seedId=${encodeURIComponent(seedIds)}&exclude=${encodeURIComponent(excluded)}&salt=${encodeURIComponent(discoverySalt)}`, { signal: controller.signal })
+    void fetch(`${localAudioApi()}/recommend?seed=${encodeURIComponent(seed)}&seedId=${encodeURIComponent(seedIds)}&exclude=${encodeURIComponent(excluded)}&salt=${encodeURIComponent(discoverySalt)}`, { signal: controller.signal })
       .then(async (response) => {
         const payload = await response.json() as { tracks?: ApiTrack[]; error?: string };
         if (!response.ok) throw new Error(payload.error || "Recommendations failed.");
@@ -1100,8 +1201,30 @@ export default function HomePage() {
     currentRef.current = current;
     const persistentCurrent = current.localUrl ? tracks[0] : current;
     const persistentHistory = listeningHistory.filter((item) => !item.track.localUrl);
-    localStorage.setItem("luma-profile", JSON.stringify({ liked, likedTracks: likedTracks.filter((track) => !track.localUrl), current: persistentCurrent, volume, listeningHistory: persistentHistory, playlists: playlists.map((playlist) => ({ ...playlist, tracks: playlist.tracks.filter((track) => !track.localUrl) })), profileName, profileAccent, notificationsRead, upNext: upNext.filter((track) => !track.localUrl) }));
-  }, [current, liked, likedTracks, listeningHistory, notificationsRead, playlists, profileAccent, profileName, profileReady, upNext, volume]);
+    const payload: SavedProfile = {
+      liked,
+      likedTracks: likedTracks.filter((track) => !track.localUrl),
+      current: persistentCurrent,
+      volume,
+      listeningHistory: persistentHistory,
+      playbackHistory: playbackHistory.filter((track) => !track.localUrl),
+      historyCursor,
+      playlists: playlists.map((playlist) => ({ ...playlist, tracks: playlist.tracks.filter((track) => !track.localUrl) })),
+      profileName,
+      profileAccent,
+      notificationsRead,
+      upNext: upNext.filter((track) => !track.localUrl),
+    };
+    localStorage.setItem("luma-profile", JSON.stringify(payload));
+    const saveTimer = window.setTimeout(() => {
+      void fetch(`${localAudioApi()}/profile`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }).catch(() => undefined);
+    }, 250);
+    return () => window.clearTimeout(saveTimer);
+  }, [current, historyCursor, liked, likedTracks, listeningHistory, notificationsRead, playbackHistory, playlists, profileAccent, profileName, profileReady, upNext, volume]);
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
@@ -1344,13 +1467,14 @@ export default function HomePage() {
                   </div>
                 </article>
                 <aside className="suggestions-card">
-                  <div className="lyrics-heading suggestion-heading"><div><p>Listening sequence</p><h2>You might also like</h2><span>Current track, queue, then related autoplay.</span></div><span className="sequence-count">{listeningSequence.length + 1} tracks</span></div>
+                  <div className="lyrics-heading suggestion-heading"><div><p>Listening sequence</p><h2>You might also like</h2><span>Your recent path, queue, then related autoplay.</span></div><span className="sequence-count">{listeningSequence.length + previousSessionTracks.length + 1} tracks</span></div>
                   <div className="suggestion-list">
                     <button className="suggestion-now" onClick={togglePlayback} aria-label={playing ? `Pause ${current.title}` : `Play ${current.title}`}>
                       <span className={playing ? "sequence-art is-playing" : "sequence-art"}><Image src={artworkUrl(current.cover)} alt="" width={64} height={64} unoptimized /><i /><i /><i /></span>
                       <span><small>NOW PLAYING</small><strong>{current.title}</strong><em>{current.artist} · {formatTime(progress)} / {formatTime(timelineDuration)}</em><span className="sequence-progress"><i style={{ transform: `scaleX(${timelineDuration ? Math.min(1, progress / timelineDuration) : 0})` }} /></span></span>
                       {playing ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
                     </button>
+                    {previousSessionTracks.length > 0 && <><div className="sequence-divider history-divider"><span>Previously played</span><i /></div>{previousSessionTracks.map(({ track, index }, position) => <button key={`history-${index}-${track.videoId}`} className="suggestion-row history-suggestion" onClick={() => jumpToHistory(track, index)}><span>{String(position + 1).padStart(2, "0")}</span><Image src={artworkUrl(track.cover)} alt="" width={48} height={48} unoptimized /><span><strong>{track.title}</strong><small>{track.artist} · History</small></span><SkipBack size={15} /></button>)}</>}
                     <div className="sequence-divider"><span>Coming up</span><i /></div>
                     {listeningSequence.map((track, index) => {
                       const queued = upNext.some((item) => item.videoId === track.videoId);
@@ -1389,7 +1513,7 @@ export default function HomePage() {
                   <Image src={artworkUrl(searchArtists[0]?.cover || remoteResults[0]?.cover || current.cover)} alt="" width={180} height={180} unoptimized />
                   <div><p className="eyebrow">Artist</p><h2>{selectedArtist}</h2><p>{remoteResults.length} songs available in Luma</p><Button onClick={() => remoteResults[0] && selectTrack(remoteResults[0])}><Play fill="currentColor" /> Play</Button></div>
                 </div>
-                {searchAlbums.length > 0 && <div className="artist-release-block"><div className="section-heading"><div><p className="eyebrow">Discography</p><h2>Albums & releases</h2></div></div><div className="catalog-carousel">{searchAlbums.map((album) => <button className="catalog-card" key={album.id} onClick={() => openAlbum(album)}><span className="catalog-cover"><Image src={artworkUrl(album.cover)} alt="" width={220} height={220} unoptimized /><i><ChevronRight /></i></span><strong>{album.title}</strong><small>{album.artist || selectedArtist}</small><em>Album</em></button>)}</div></div>}
+                {searchAlbums.length > 0 && <div className="artist-release-block"><div className="section-heading"><div><p className="eyebrow">Discography</p><h2>Albums & releases</h2></div></div><div className="release-grid">{searchAlbums.map((album) => <button className="catalog-card" key={album.id} onClick={() => openAlbum(album)}><span className="catalog-cover"><Image src={artworkUrl(album.cover)} alt="" width={220} height={220} unoptimized /><i><ChevronRight /></i></span><strong>{album.title}</strong><small>{album.artist || selectedArtist}</small><em>Album</em></button>)}</div></div>}
                 <div className="artist-release-block"><div className="section-heading"><div><p className="eyebrow">Popular</p><h2>Songs</h2></div></div><div className="track-list">{remoteResults.slice(0, 12).map((track, index) => <button className="track-row" key={track.videoId} onClick={() => selectTrack(track)}><span className="track-number">{String(index + 1).padStart(2, "0")}</span><Image src={artworkUrl(track.cover)} alt="" width={52} height={52} unoptimized /><span className="track-title"><strong>{track.title}</strong><small>{track.artist}</small></span><span className="track-album">{track.album}</span><span className="track-duration">{track.duration}</span><Play size={16} /></button>)}</div></div>
               </section>
             )}
@@ -1448,11 +1572,11 @@ export default function HomePage() {
             )}
 
             {!selectedArtist && !selectedAlbum && (query || !["Albums", "Artists", "Radio"].includes(activeNav)) && <section className={`section-block recommendations-section${!query && activeNav === "Songs" ? " songs-recommendations" : ""}`}>
-              <div className="section-heading recommendation-heading"><div><h2>{query ? "Songs" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Recently Played" ? "Recently played" : activeNav === "Local Files" ? "Local songs" : activeNav === "Songs" ? "Your rotation" : "Picked for you"}</h2><p>{query ? "Only music releases matching your search." : activeNav === "Library" || activeNav === "Favorite Songs" ? "The music you chose to keep close." : activeNav === "Recently Played" ? "Continue from where you left off." : activeNav === "Local Files" ? "Private tracks stored on this device." : activeNav === "Songs" ? "A continuous shelf built around what you actually return to." : recommendations.length ? "A growing mix shaped by what you actually play." : "Play a few songs and Luma will learn your taste."}</p></div>{!query && activeNav === "Browse" && <span className="recommendation-status">{moreRecommendationsLoading ? "Finding more…" : `${results.length} songs in your mix`}</span>}</div>
+              {(query || activeNav !== "Recently Played") && <div className="section-heading recommendation-heading"><div><h2>{query ? "Songs" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Local Files" ? "Local songs" : activeNav === "Songs" ? "Your rotation" : "Picked for you"}</h2><p>{query ? "Only music releases matching your search." : activeNav === "Library" || activeNav === "Favorite Songs" ? "The music you chose to keep close." : activeNav === "Local Files" ? "Private tracks stored on this device." : activeNav === "Songs" ? "A continuous collection built around what you actually return to." : recommendations.length ? "A growing mix shaped by what you actually play." : "Play a few songs and Luma will learn your taste."}</p></div>{!query && activeNav === "Browse" && <span className="recommendation-status">{moreRecommendationsLoading ? "Finding more…" : `${results.length} songs in your mix`}</span>}</div>}
               {!query && activeNav === "Browse" && <div className="recommendation-context"><span><Sparkles size={14} /> Personal mix</span><span>Based on {tasteSeeds.slice(0, 3).join(", ") || current.artist}</span><span>{results.length} tracks · updates while you listen</span></div>}
-              <div className={!query && ["Browse", "Songs"].includes(activeNav) ? "carousel-frame recommendation-frame" : undefined}>
-              {!query && ["Browse", "Songs"].includes(activeNav) && <button className="carousel-arrow previous" onClick={() => scrollPicked(-1)} disabled={!pickedScroll.canPrev} aria-label="Previous recommendations"><ChevronLeft /></button>}
-              <div ref={!query && ["Browse", "Songs"].includes(activeNav) ? pickedCarouselRef : undefined} className={query ? "album-grid search-grid" : "album-carousel"} onScroll={(event) => { const element = event.currentTarget; setPickedScroll(readCarouselPosition(element)); if (!query && element.scrollWidth - element.scrollLeft - element.clientWidth < element.clientWidth) void loadMoreRecommendations(); }}>
+              <div className={!query && activeNav === "Browse" ? "carousel-frame recommendation-frame" : undefined}>
+              {!query && activeNav === "Browse" && <button className="carousel-arrow previous" onClick={() => scrollPicked(-1)} disabled={!pickedScroll.canPrev} aria-label="Previous recommendations"><ChevronLeft /></button>}
+              <div ref={!query && activeNav === "Browse" ? pickedCarouselRef : undefined} className={query ? "album-grid search-grid" : activeNav === "Browse" ? "album-carousel" : "album-grid songs-grid"} onScroll={(event) => { if (query || activeNav !== "Browse") return; const element = event.currentTarget; setPickedScroll(readCarouselPosition(element)); if (element.scrollWidth - element.scrollLeft - element.clientWidth < element.clientWidth) void loadMoreRecommendations(); }}>
                 {results.slice(0, query ? 18 : ["Browse", "Songs"].includes(activeNav) ? 60 : 30).map((track) => (
                   <article className={current.videoId === track.videoId ? `album-card selected${playing ? " is-playing" : ""}` : "album-card"} key={track.id}>
                     <button className="cover-button" onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => selectTrack(track)} aria-label={`Play ${track.title} by ${track.artist}`}>
@@ -1482,11 +1606,11 @@ export default function HomePage() {
                   </article>
                 ))}
               </div>
-              {!query && ["Browse", "Songs"].includes(activeNav) && <button className="carousel-arrow next" onClick={() => scrollPicked(1)} disabled={!pickedScroll.canNext} aria-label="More recommendations"><ChevronRight /></button>}
+              {!query && activeNav === "Browse" && <button className="carousel-arrow next" onClick={() => scrollPicked(1)} disabled={!pickedScroll.canNext} aria-label="More recommendations"><ChevronRight /></button>}
               </div>
-              {!query && ["Browse", "Songs"].includes(activeNav) && <div className="carousel-footer recommendation-footer"><span className="carousel-progress" aria-hidden="true"><i style={{ "--carousel-progress": pickedScroll.progress } as React.CSSProperties} /></span><span>More music is added as you explore</span></div>}
+              {!query && activeNav === "Browse" && <div className="carousel-footer recommendation-footer"><span className="carousel-progress" aria-hidden="true"><i style={{ "--carousel-progress": pickedScroll.progress } as React.CSSProperties} /></span><span>More music is added as you explore</span></div>}
               {searching && <div className="empty-state"><Search /><h3>Finding songs…</h3><p>Filtering out interviews, reactions and unrelated videos.</p></div>}
-              {!searching && results.length === 0 && <div className="empty-state">{(activeNav === "Library" || activeNav === "Favorite Songs") && !query ? <Heart /> : activeNav === "Local Files" ? <FileAudio /> : <Search />}<h3>{searchError ? "Local audio service unavailable" : activeNav === "Local Files" ? "No local music yet" : (activeNav === "Library" || activeNav === "Favorite Songs") && !query ? selectedPlaylist ? "This playlist is empty" : "Your favorite songs are empty" : "No songs found"}</h3><p>{searchError || (activeNav === "Local Files" ? "Add audio files from this device to play them in Luma." : (activeNav === "Library" || activeNav === "Favorite Songs") && !query ? selectedPlaylist ? "Use the playlist button on any song to add it here." : "Like a song and it will appear here." : "Try another song or artist.")}</p><Button onClick={() => (activeNav === "Library" || activeNav === "Favorite Songs") && !query ? navigate("Browse") : setQuery("")}>{(activeNav === "Library" || activeNav === "Favorite Songs") && !query ? "Browse music" : "Clear search"}</Button></div>}
+              {!searching && results.length === 0 && <div className="empty-state">{(activeNav === "Library" || activeNav === "Favorite Songs") && !query ? <Heart /> : activeNav === "Local Files" ? <FileAudio /> : activeNav === "Recently Played" ? <Clock3 /> : <Search />}<h3>{searchError ? "Local audio service unavailable" : activeNav === "Local Files" ? "No local music yet" : activeNav === "Recently Played" ? "No listening history yet" : (activeNav === "Library" || activeNav === "Favorite Songs") && !query ? selectedPlaylist ? "This playlist is empty" : "Your favorite songs are empty" : "No songs found"}</h3><p>{searchError || (activeNav === "Local Files" ? "Add audio files from this device to play them in Luma." : activeNav === "Recently Played" ? "Play something and it will stay here for the next visit." : (activeNav === "Library" || activeNav === "Favorite Songs") && !query ? selectedPlaylist ? "Use the playlist button on any song to add it here." : "Like a song and it will appear here." : "Try another song or artist.")}</p><Button onClick={() => (activeNav === "Library" || activeNav === "Favorite Songs" || activeNav === "Recently Played") && !query ? navigate("Browse") : setQuery("")}>{(activeNav === "Library" || activeNav === "Favorite Songs" || activeNav === "Recently Played") && !query ? "Explore music" : "Clear search"}</Button></div>}
             </section>}
 
             {!query && activeNav === "Browse" && !detailOpen && (
@@ -1584,6 +1708,7 @@ export default function HomePage() {
               {playing ? <span className="playing-bars"><i /><i /><i /></span> : <Play size={18} fill="currentColor" />}
             </div>
             <div className="queue-content">
+              {previousSessionTracks.length > 0 && <><div className="queue-section-heading history-heading"><div><span>Previously played</span><small>Return to any song from this session</small></div><Clock3 size={17} /></div><div className="queue-list history-list">{previousSessionTracks.map(({ track, index }, position) => <article className="queue-row" key={`queue-history-${index}-${track.videoId}`}><button className="queue-track" onClick={() => { jumpToHistory(track, index); setQueueOpen(false); }}><span>{String(position + 1).padStart(2, "0")}</span><Image src={artworkUrl(track.cover)} alt="" width={48} height={48} unoptimized /><span><strong>{track.title}</strong><small>{track.artist}</small></span></button></article>)}</div></>}
               <div className="queue-section-heading"><div><span>Next in queue</span><small>Use arrows to reorder</small></div>{upNext.length > 0 && <button onClick={() => commitUpNext([])}><Trash2 size={15} /> Clear</button>}</div>
               {upNext.length === 0 && <div className="queue-empty"><ListMusic /><strong>Your queue is empty</strong><span>Use a song menu and choose Play next or Add to queue.</span></div>}
               <div className="queue-list">

@@ -46,3 +46,5 @@ __pycache__/
 /.codex/
 /outputs/
 /work/
+/local-backend/luma-profile.local.json
+/local-backend/luma-profile.tmp

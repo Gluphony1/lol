@@ -1,8 +1,9 @@
 {
   "name": "Luma Music",
   "short_name": "Luma",
+  "id": "/",
   "description": "Original music discovery and generative playback.",
-  "start_url": "/",
+  "start_url": "/?source=pwa",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait-primary",
