@@ -8,6 +8,7 @@
   "scripts": {
     "install:ci": "node scripts/install-ci.mjs",
     "local": "node scripts/run-local.mjs",
+    "local:tailscale": "node scripts/run-local.mjs --tailscale",
     "dev": "node scripts/run-local.mjs",
     "dev:vite": "node scripts/run-framework.mjs dev",
     "build": "node scripts/run-framework.mjs build",

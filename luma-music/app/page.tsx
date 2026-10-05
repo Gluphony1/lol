@@ -7,6 +7,7 @@ import {
   ArrowDown,
   ArrowUp,
   Bell,
+  Check,
   Clock3,
   ChevronLeft,
   ChevronRight,
@@ -114,6 +115,11 @@ type SearchEntity = {
   cover: string;
 };
 
+type SearchSuggestion =
+  | { kind: "track"; label: string; description: string; cover: string; track: Track }
+  | { kind: "artist"; label: string; description: string; cover: string; entity: SearchEntity }
+  | { kind: "album"; label: string; description: string; cover: string; entity: SearchEntity };
+
 type AlbumRelease = SearchEntity & {
   year?: string;
   tracks: Track[];
@@ -157,9 +163,10 @@ const tracks: Track[] = [
 ];
 
 const LOCAL_AUDIO_API = typeof window !== "undefined" && !["127.0.0.1", "localhost"].includes(window.location.hostname)
-  ? `${window.location.protocol}//${window.location.hostname}:8443`
+  ? `${window.location.protocol}//${window.location.hostname}:8765`
   : "http://127.0.0.1:8765";
 const resultColors = ["#ff5ca8", "#60a5fa", "#a78bfa", "#fb7185", "#818cf8", "#22d3ee"];
+const profileColors = ["#6f66df", "#bc5d3f", "#397a70", "#9a6b24", "#805475"];
 const artworkUrl = (cover: string) => {
   if (!cover.startsWith("https://")) return cover;
   try {
@@ -243,6 +250,7 @@ export default function HomePage() {
   const [notificationsRead, setNotificationsRead] = useState(false);
   const [profileName, setProfileName] = useState("");
   const [profileDraft, setProfileDraft] = useState("");
+  const [profileAccent, setProfileAccent] = useState(profileColors[0]);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [playlistOpen, setPlaylistOpen] = useState(false);
   const [playlistName, setPlaylistName] = useState("");
@@ -278,12 +286,16 @@ export default function HomePage() {
   const [listeningHistory, setListeningHistory] = useState<ListeningRecord[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [searchActiveIndex, setSearchActiveIndex] = useState(-1);
+  const [activeCatalogId, setActiveCatalogId] = useState("");
   const [playerRecovery, setPlayerRecovery] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const scrollAreaRef = useRef<HTMLDivElement | null>(null);
   const lyricsScrollRef = useRef<HTMLDivElement | null>(null);
   const pickedCarouselRef = useRef<HTMLDivElement | null>(null);
   const artistCarouselRef = useRef<HTMLDivElement | null>(null);
+  const searchShellRef = useRef<HTMLDivElement | null>(null);
   const [pickedScroll, setPickedScroll] = useState({ progress: 0, canPrev: false, canNext: true });
   const [artistScroll, setArtistScroll] = useState({ progress: 0, canPrev: false, canNext: true });
   const lyricLineRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -398,6 +410,26 @@ export default function HomePage() {
       .sort((left, right) => discoveryScore(left.artist, discoverySalt) - discoveryScore(right.artist, discoverySalt))
       .slice(0, 8);
   }, [current, discoverySalt, listeningHistory, recommendations, tasteSeedTracks]);
+  const selectedCatalogSection = useMemo(() => (
+    catalogSections.find((section) => section.id === activeCatalogId) || catalogSections[0] || null
+  ), [activeCatalogId, catalogSections]);
+  const searchSuggestions = useMemo<SearchSuggestion[]>(() => {
+    const term = query.trim();
+    if (!term) {
+      return recentTracks.slice(0, 5).map((track) => ({
+        kind: "track" as const,
+        label: track.title,
+        description: `${track.artist} · Recently played`,
+        cover: track.cover,
+        track,
+      }));
+    }
+    return [
+      ...remoteResults.slice(0, 5).map((track) => ({ kind: "track" as const, label: track.title, description: `${track.artist} · ${track.album}`, cover: track.cover, track })),
+      ...searchArtists.slice(0, 2).map((entity) => ({ kind: "artist" as const, label: entity.title, description: "Artist", cover: entity.cover, entity })),
+      ...searchAlbums.slice(0, 2).map((entity) => ({ kind: "album" as const, label: entity.title, description: `${entity.artist || "Album"} · Album`, cover: entity.cover, entity })),
+    ].slice(0, 8);
+  }, [query, recentTracks, remoteResults, searchAlbums, searchArtists]);
   const autoplayTracks = useMemo(() => {
     const queuedIds = new Set([current.videoId, ...upNext.map((track) => track.videoId)]);
     const unique = new Map<string, Track>();
@@ -668,6 +700,48 @@ export default function HomePage() {
     setQuery(`${track.album} ${track.artist}`.trim());
   };
 
+  const chooseSearchSuggestion = (suggestion: SearchSuggestion) => {
+    setSearchFocused(false);
+    setSearchActiveIndex(-1);
+    if (suggestion.kind === "track") {
+      selectTrack(suggestion.track);
+      return;
+    }
+    if (suggestion.kind === "artist") {
+      openArtist(suggestion.entity.title);
+      return;
+    }
+    openAlbum(suggestion.entity);
+  };
+
+  const handleSearchKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Escape") {
+      setSearchFocused(false);
+      setSearchActiveIndex(-1);
+      return;
+    }
+    if (!searchSuggestions.length) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setSearchFocused(true);
+      setSearchActiveIndex((index) => (index + 1) % searchSuggestions.length);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setSearchFocused(true);
+      setSearchActiveIndex((index) => (index <= 0 ? searchSuggestions.length - 1 : index - 1));
+    } else if (event.key === "Enter" && searchActiveIndex >= 0) {
+      event.preventDefault();
+      chooseSearchSuggestion(searchSuggestions[searchActiveIndex]);
+    }
+  };
+
+  const refreshFeed = () => {
+    setRecommendations([]);
+    setDiscoverySalt(crypto.randomUUID());
+    setDetailOpen(false);
+    navigate("Browse");
+  };
+
   const loadMoreRecommendations = async () => {
     if (moreRecommendationsLoading || !backendReady) return;
     setMoreRecommendationsLoading(true);
@@ -771,7 +845,7 @@ export default function HomePage() {
     queueMicrotask(() => {
       if (!mounted) return;
       try {
-        const saved = JSON.parse(localStorage.getItem("luma-profile") || "null") as { liked?: string[]; likedTracks?: Track[]; current?: Track; volume?: number; listeningHistory?: ListeningRecord[]; playlists?: Playlist[]; profileName?: string; notificationsRead?: boolean; upNext?: Track[] } | null;
+        const saved = JSON.parse(localStorage.getItem("luma-profile") || "null") as { liked?: string[]; likedTracks?: Track[]; current?: Track; volume?: number; listeningHistory?: ListeningRecord[]; playlists?: Playlist[]; profileName?: string; profileAccent?: string; notificationsRead?: boolean; upNext?: Track[] } | null;
         if (saved?.liked?.every((id) => typeof id === "string")) setLiked(saved.liked);
         if (Array.isArray(saved?.likedTracks)) setSavedLikedTracks(saved.likedTracks.map(normalizeSavedTrack));
         if (saved?.current && typeof saved.current.videoId === "string" && typeof saved.current.title === "string") {
@@ -784,6 +858,7 @@ export default function HomePage() {
           setProfileName(saved.profileName.slice(0, 60));
           setProfileDraft(saved.profileName.slice(0, 60));
         }
+        if (typeof saved?.profileAccent === "string" && profileColors.includes(saved.profileAccent)) setProfileAccent(saved.profileAccent);
         if (typeof saved?.notificationsRead === "boolean") setNotificationsRead(saved.notificationsRead);
         if (Array.isArray(saved?.playlists)) {
           setPlaylists(saved.playlists.filter((playlist) => playlist?.id && playlist?.name && Array.isArray(playlist.tracks)).map((playlist) => ({
@@ -990,7 +1065,7 @@ export default function HomePage() {
       .filter((videoId, index, items) => items.indexOf(videoId) === index)
       .slice(0, 40)
       .join(",");
-    void fetch(`${LOCAL_AUDIO_API}/recommend?seed=${encodeURIComponent(seed)}&seedId=${encodeURIComponent(seedIds)}&exclude=${encodeURIComponent(excluded)}`, { signal: controller.signal })
+    void fetch(`${LOCAL_AUDIO_API}/recommend?seed=${encodeURIComponent(seed)}&seedId=${encodeURIComponent(seedIds)}&exclude=${encodeURIComponent(excluded)}&salt=${encodeURIComponent(discoverySalt)}`, { signal: controller.signal })
       .then(async (response) => {
         const payload = await response.json() as { tracks?: ApiTrack[]; error?: string };
         if (!response.ok) throw new Error(payload.error || "Recommendations failed.");
@@ -1002,7 +1077,7 @@ export default function HomePage() {
       })
       .catch(() => undefined);
     return () => controller.abort();
-  }, [backendReady, current, listeningHistory, profileReady, query, tasteSeedKey, tasteTrackKey]);
+  }, [backendReady, current, discoverySalt, listeningHistory, profileReady, query, tasteSeedKey, tasteTrackKey]);
 
   useEffect(() => {
     queueRef.current = results;
@@ -1025,8 +1100,8 @@ export default function HomePage() {
     currentRef.current = current;
     const persistentCurrent = current.localUrl ? tracks[0] : current;
     const persistentHistory = listeningHistory.filter((item) => !item.track.localUrl);
-    localStorage.setItem("luma-profile", JSON.stringify({ liked, likedTracks: likedTracks.filter((track) => !track.localUrl), current: persistentCurrent, volume, listeningHistory: persistentHistory, playlists: playlists.map((playlist) => ({ ...playlist, tracks: playlist.tracks.filter((track) => !track.localUrl) })), profileName, notificationsRead, upNext: upNext.filter((track) => !track.localUrl) }));
-  }, [current, liked, likedTracks, listeningHistory, notificationsRead, playlists, profileName, profileReady, upNext, volume]);
+    localStorage.setItem("luma-profile", JSON.stringify({ liked, likedTracks: likedTracks.filter((track) => !track.localUrl), current: persistentCurrent, volume, listeningHistory: persistentHistory, playlists: playlists.map((playlist) => ({ ...playlist, tracks: playlist.tracks.filter((track) => !track.localUrl) })), profileName, profileAccent, notificationsRead, upNext: upNext.filter((track) => !track.localUrl) }));
+  }, [current, liked, likedTracks, listeningHistory, notificationsRead, playlists, profileAccent, profileName, profileReady, upNext, volume]);
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
@@ -1086,9 +1161,10 @@ export default function HomePage() {
         <aside className="sidebar">
           <div className="brand" aria-label="Luma home">
             <span className="brand-mark"><i /><i /><i /></span>
-            <span>LUMA</span>
+            <span className="brand-copy"><strong>LUMA</strong><small>Your frequency</small></span>
           </div>
 
+          <p className="sidebar-group-label">Discover</p>
           <nav className="primary-nav" aria-label="Main navigation">
             {navItems.map(({ label, icon: Icon }) => (
               <button key={label} className={activeNav === label ? "nav-item active" : "nav-item"} onClick={() => navigate(label)}>
@@ -1099,33 +1175,44 @@ export default function HomePage() {
           </nav>
 
           <div className="library-block">
-            <div className="side-label"><span>My music</span><button onClick={() => setPlaylistOpen(true)} aria-label="Create playlist"><Plus size={15} /></button></div>
+            <div className="side-label"><span>Your music</span></div>
             <nav className="secondary-nav" aria-label="My music">
               {myMusicItems.map(({ label, icon: Icon }) => <button key={label} className={activeNav === label ? "side-link active" : "side-link"} onClick={() => navigate(label)}><Icon size={17} /><span>{label}</span>{label === "Favorite Songs" && <small>{likedTracks.length}</small>}</button>)}
             </nav>
-            <div className="side-label playlist-label"><span>Playlists</span></div>
+            <button className="sidebar-create-playlist" onClick={() => setPlaylistOpen(true)}><Plus size={16} /><span>New playlist</span></button>
+            <div className="side-label playlist-label"><span>Your playlists</span><small>{playlists.length}</small></div>
             {playlists.map((playlist) => <button className="collection-item" key={playlist.id} onClick={() => openPlaylist(playlist.id)}><span className="playlist-tile"><ListMusic size={15} /></span><span>{playlist.name}<small>{playlist.tracks.length} tracks</small></span></button>)}
           </div>
 
-          <button className="sidebar-footer" onClick={() => { setProfileDraft(viewerName); setProfileOpen(true); }} aria-label="Open profile">
-            <div className="profile-avatar">{viewerInitials}</div>
-            <div><strong>{viewerName}</strong><span>{viewer?.email || "Local profile"}</span></div>
+          <button className="sidebar-footer" style={{ "--profile-accent": profileAccent } as React.CSSProperties} onClick={() => { setProfileDraft(viewerName); setProfileOpen(true); }} aria-label="Open profile">
+            <span className="sidebar-profile-art"><Image src={artworkUrl(current.cover)} alt="" width={48} height={48} unoptimized /><i>{viewerInitials}</i></span>
+            <span className="sidebar-profile-copy"><small>Listening profile</small><strong>{viewerName}</strong><em>{topArtist} leads your sound</em></span>
             <ChevronRight size={16} />
           </button>
         </aside>
 
         <main className="content">
           <header className="topbar">
-            <div className={query ? "search-box has-query" : "search-box"}>
-              <Search size={18} aria-hidden="true" />
-              <input value={query} onChange={(event) => { setSelectedArtist(null); setSelectedAlbum(null); setAlbumRelease(null); setQuery(event.target.value); }} placeholder="Search songs, albums, artists…" aria-label="Search music" />
-              {query ? <button className="search-clear" onClick={() => setQuery("")} aria-label="Clear search"><X size={15} /></button> : <kbd title="Focus search with Ctrl+K">Ctrl K</kbd>}
+            <div ref={searchShellRef} className="search-shell" onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) { setSearchFocused(false); setSearchActiveIndex(-1); } }}>
+              <div className={query ? "search-box has-query" : "search-box"}>
+                <Search size={18} aria-hidden="true" />
+                <input value={query} onFocus={() => setSearchFocused(true)} onKeyDown={handleSearchKeyDown} onChange={(event) => { setSelectedArtist(null); setSelectedAlbum(null); setAlbumRelease(null); setSearchFocused(true); setSearchActiveIndex(-1); setQuery(event.target.value); }} placeholder="Search songs, albums, artists…" aria-label="Search music" role="combobox" aria-expanded={searchFocused} aria-controls="search-suggestions" aria-activedescendant={searchActiveIndex >= 0 ? `search-suggestion-${searchActiveIndex}` : undefined} />
+                {query ? <button className="search-clear" onClick={() => { setQuery(""); setSearchActiveIndex(-1); }} aria-label="Clear search"><X size={15} /></button> : <kbd title="Focus search with Ctrl+K">Ctrl K</kbd>}
+              </div>
+              {searchFocused && (
+                <div id="search-suggestions" className="search-suggestions" role="listbox" aria-label="Search suggestions">
+                  <div className="search-suggestions-heading"><strong>{query ? "Top matches" : "Listen again"}</strong><span>{searching ? "Searching…" : query ? `${searchSuggestions.length} suggestions` : "From your history"}</span></div>
+                  {searchSuggestions.map((suggestion, index) => (
+                    <button id={`search-suggestion-${index}`} role="option" aria-selected={searchActiveIndex === index} className={searchActiveIndex === index ? "search-suggestion active" : "search-suggestion"} key={`${suggestion.kind}-${suggestion.label}-${index}`} onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setSearchActiveIndex(index)} onClick={() => chooseSearchSuggestion(suggestion)}>
+                      <Image src={artworkUrl(suggestion.cover)} alt="" width={44} height={44} unoptimized />
+                      <span><strong>{suggestion.label}</strong><small>{suggestion.description}</small></span>
+                      <span className="search-kind">{suggestion.kind}</span>
+                    </button>
+                  ))}
+                  {!searching && query && searchSuggestions.length === 0 && <div className="search-suggestion-empty"><Search size={18} /><span>No exact suggestion yet. Press Enter to see all results.</span></div>}
+                </div>
+              )}
             </div>
-            <nav className="browse-tabs" aria-label="Browse shortcuts">
-              <button onClick={() => navigate("Albums")}>New Releases</button>
-              <button onClick={() => navigate("Browse")}>New Feed</button>
-              <button onClick={playShuffle}><Shuffle size={14} /> Shuffle Play</button>
-            </nav>
             <div className="top-actions">
               {activeNav !== "Browse" && detailOpen && <button className={playing ? "resume-playing is-playing" : "resume-playing"} onClick={openNowPlaying}><span aria-hidden="true"><i /><i /><i /></span><span>Now playing</span></button>}
               <Button className="upgrade-button" onClick={handleInstall}><Download /> Install app</Button>
@@ -1134,8 +1221,8 @@ export default function HomePage() {
                 <PopoverContent align="end" className="notification-panel">
                   <div className="notification-heading"><strong>Notifications</strong><button onClick={() => setNotificationsRead(true)}>Mark as read</button></div>
                   {!notificationsRead ? <>
-                    <div className="notification-item"><span className="notification-icon"><Sparkles size={16} /></span><div><strong>Your mix is ready</strong><p>{recommendations.length} songs based on your recent listening.</p></div></div>
-                    <div className="notification-item"><span className="notification-icon"><Heart size={16} /></span><div><strong>Library updated</strong><p>{likedTracks.length} liked {likedTracks.length === 1 ? "song" : "songs"} · {playlists.length} {playlists.length === 1 ? "playlist" : "playlists"}.</p></div></div>
+                    <button className="notification-item" onClick={() => { setNotificationsRead(true); refreshFeed(); }}><span className="notification-icon"><Sparkles size={16} /></span><span><strong>Your mix is ready</strong><p>{recommendations.length} songs based on your recent listening.</p><small>Open your new feed</small></span><ChevronRight size={16} /></button>
+                    <button className="notification-item" onClick={() => { setNotificationsRead(true); navigate("Favorite Songs"); }}><span className="notification-icon"><Heart size={16} /></span><span><strong>Library updated</strong><p>{likedTracks.length} liked {likedTracks.length === 1 ? "song" : "songs"} · {playlists.length} {playlists.length === 1 ? "playlist" : "playlists"}.</p><small>View your library</small></span><ChevronRight size={16} /></button>
                   </> : <p className="notifications-empty">You&apos;re all caught up.</p>}
                 </PopoverContent>
               </Popover>
@@ -1157,6 +1244,14 @@ export default function HomePage() {
                   {searchArtists.slice(0, 2).map((entity) => <button className="entity-card artist-entity" key={`artist-${entity.id}`} onClick={() => openArtist(entity.title)}><Image src={artworkUrl(entity.cover)} alt="" width={72} height={72} unoptimized /><span><small><UserRound size={13} /> Artist</small><strong>{entity.title}</strong><em>Explore songs</em></span><ChevronRight /></button>)}
                   {searchAlbums.slice(0, 4).map((entity) => <button className="entity-card" key={`album-${entity.id}`} onClick={() => openAlbum(entity)}><Image src={artworkUrl(entity.cover)} alt="" width={72} height={72} unoptimized /><span><small><Disc3 size={13} /> Album</small><strong>{entity.title}</strong><em>{entity.artist || "YouTube Music"}</em></span><ChevronRight /></button>)}
                 </div>
+              </section>
+            )}
+
+            {!query && activeNav === "Browse" && !detailOpen && (
+              <section className="browse-command-strip" aria-label="Discover music">
+                <button onClick={() => navigate("Albums")}><span className="command-icon"><Disc3 /></span><span><strong>New releases</strong><small>Fresh albums from your sound</small></span><ChevronRight /></button>
+                <button onClick={refreshFeed}><span className="command-icon"><Sparkles /></span><span><strong>New feed</strong><small>Rebuild recommendations now</small></span><ChevronRight /></button>
+                <button onClick={playShuffle}><span className="command-icon"><Shuffle /></span><span><strong>Shuffle play</strong><small>Start with something unexpected</small></span><Play fill="currentColor" /></button>
               </section>
             )}
 
@@ -1241,7 +1336,7 @@ export default function HomePage() {
             {!query && activeNav === "Browse" && detailOpen && (
               <section className="song-experience" aria-label={`Lyrics and suggestions for ${current.title}`}>
                 <article className="lyrics-card">
-                  <div className="lyrics-heading"><div><p className="eyebrow">Lyrics</p><h2>Sing along</h2></div><button type="button" className={lyricsFollowEnabled ? "lyrics-live active" : "lyrics-live"} aria-pressed={lyricsFollowEnabled} aria-label={lyricsFollowEnabled ? "Live lyrics follow enabled" : "Resume live lyrics follow"} onClick={() => { setLyricsFollowEnabled(true); centerActiveLyric("smooth"); }}><Mic2 size={15} /><span>Live{lyricsLanguage ? ` · ${lyricsLanguage.toUpperCase()}` : ""}</span></button></div>
+                  <div className="lyrics-heading"><div><h2>Lyrics</h2><p>{current.title}<span>{current.artist}</span></p></div><button type="button" className={lyricsFollowEnabled ? "lyrics-live active" : "lyrics-live"} aria-pressed={lyricsFollowEnabled} aria-label={lyricsFollowEnabled ? "Live lyrics follow enabled" : "Resume live lyrics follow"} onClick={() => { setLyricsFollowEnabled(true); centerActiveLyric("smooth"); }}><Mic2 size={15} /><span>{lyricsFollowEnabled ? "Following" : "Resume"}{lyricsLanguage ? ` · ${lyricsLanguage.toUpperCase()}` : ""}</span></button></div>
                   <div ref={lyricsScrollRef} className="lyrics-scroll" aria-live="polite" tabIndex={0} onWheel={() => setLyricsFollowEnabled(false)} onTouchMove={() => setLyricsFollowEnabled(false)} onPointerDown={(event) => { if (event.target === event.currentTarget) setLyricsFollowEnabled(false); }} onKeyDown={(event) => { if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) setLyricsFollowEnabled(false); }}>
                     {lyricsLoading && <div className="lyrics-empty">Loading lyrics…</div>}
                     {!lyricsLoading && lyrics.length === 0 && <div className="lyrics-empty"><Mic2 /><strong>Lyrics aren&apos;t available for this release.</strong><span>Try another version of the song.</span></div>}
@@ -1269,7 +1364,15 @@ export default function HomePage() {
             )}
 
             {!query && activeNav === "Songs" && (
-              <div className="taste-strip"><Sparkles size={17} /><span>Recommendations tuned from</span>{tasteSeeds.map((artist) => <button key={artist} onClick={() => setQuery(artist)}>{artist}</button>)}</div>
+              <section className="songs-control-deck" aria-label="Song collection controls">
+                <div><p className="eyebrow">Your library, in motion</p><h2>Your rotation</h2><span>Familiar favorites and fresh tracks that belong beside them.</span></div>
+                <div className="songs-view-switch" aria-label="Song views">
+                  <button className="active" aria-pressed="true">For you</button>
+                  <button onClick={() => navigate("Recently Played")}>Recently played</button>
+                  <button onClick={() => navigate("Favorite Songs")}>Liked songs</button>
+                </div>
+                <button className="songs-shuffle" onClick={playShuffle}><Shuffle size={17} /><span>Shuffle all</span></button>
+              </section>
             )}
 
             {!query && (activeNav === "Library" || activeNav === "Favorite Songs") && (
@@ -1344,9 +1447,9 @@ export default function HomePage() {
               </section>
             )}
 
-            {!selectedArtist && !selectedAlbum && (query || !["Albums", "Artists", "Radio"].includes(activeNav)) && <section className="section-block recommendations-section">
-              <div className="section-heading recommendation-heading"><div><h2>{query ? "Songs" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Recently Played" ? "Recently played" : activeNav === "Local Files" ? "Local songs" : activeNav === "Songs" ? "Songs picked for you" : "Picked for you"}</h2><p>{query ? "Only music releases matching your search." : activeNav === "Library" || activeNav === "Favorite Songs" ? "The music you chose to keep close." : activeNav === "Recently Played" ? "Continue from where you left off." : activeNav === "Local Files" ? "Private tracks stored on this device." : recommendations.length ? "A growing mix shaped by what you actually play." : "Play a few songs and Luma will learn your taste."}</p></div>{!query && ["Browse", "Songs"].includes(activeNav) && <span className="recommendation-status">{moreRecommendationsLoading ? "Finding more…" : `${results.length} songs in your mix`}</span>}</div>
-              {!query && ["Browse", "Songs"].includes(activeNav) && <div className="recommendation-context"><span><Sparkles size={14} /> Personal mix</span><span>Based on {tasteSeeds.slice(0, 3).join(", ") || current.artist}</span><span>{results.length} tracks · updates while you listen</span></div>}
+            {!selectedArtist && !selectedAlbum && (query || !["Albums", "Artists", "Radio"].includes(activeNav)) && <section className={`section-block recommendations-section${!query && activeNav === "Songs" ? " songs-recommendations" : ""}`}>
+              <div className="section-heading recommendation-heading"><div><h2>{query ? "Songs" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Recently Played" ? "Recently played" : activeNav === "Local Files" ? "Local songs" : activeNav === "Songs" ? "Your rotation" : "Picked for you"}</h2><p>{query ? "Only music releases matching your search." : activeNav === "Library" || activeNav === "Favorite Songs" ? "The music you chose to keep close." : activeNav === "Recently Played" ? "Continue from where you left off." : activeNav === "Local Files" ? "Private tracks stored on this device." : activeNav === "Songs" ? "A continuous shelf built around what you actually return to." : recommendations.length ? "A growing mix shaped by what you actually play." : "Play a few songs and Luma will learn your taste."}</p></div>{!query && activeNav === "Browse" && <span className="recommendation-status">{moreRecommendationsLoading ? "Finding more…" : `${results.length} songs in your mix`}</span>}</div>
+              {!query && activeNav === "Browse" && <div className="recommendation-context"><span><Sparkles size={14} /> Personal mix</span><span>Based on {tasteSeeds.slice(0, 3).join(", ") || current.artist}</span><span>{results.length} tracks · updates while you listen</span></div>}
               <div className={!query && ["Browse", "Songs"].includes(activeNav) ? "carousel-frame recommendation-frame" : undefined}>
               {!query && ["Browse", "Songs"].includes(activeNav) && <button className="carousel-arrow previous" onClick={() => scrollPicked(-1)} disabled={!pickedScroll.canPrev} aria-label="Previous recommendations"><ChevronLeft /></button>}
               <div ref={!query && ["Browse", "Songs"].includes(activeNav) ? pickedCarouselRef : undefined} className={query ? "album-grid search-grid" : "album-carousel"} onScroll={(event) => { const element = event.currentTarget; setPickedScroll(readCarouselPosition(element)); if (!query && element.scrollWidth - element.scrollLeft - element.clientWidth < element.clientWidth) void loadMoreRecommendations(); }}>
@@ -1386,19 +1489,26 @@ export default function HomePage() {
               {!searching && results.length === 0 && <div className="empty-state">{(activeNav === "Library" || activeNav === "Favorite Songs") && !query ? <Heart /> : activeNav === "Local Files" ? <FileAudio /> : <Search />}<h3>{searchError ? "Local audio service unavailable" : activeNav === "Local Files" ? "No local music yet" : (activeNav === "Library" || activeNav === "Favorite Songs") && !query ? selectedPlaylist ? "This playlist is empty" : "Your favorite songs are empty" : "No songs found"}</h3><p>{searchError || (activeNav === "Local Files" ? "Add audio files from this device to play them in Luma." : (activeNav === "Library" || activeNav === "Favorite Songs") && !query ? selectedPlaylist ? "Use the playlist button on any song to add it here." : "Like a song and it will appear here." : "Try another song or artist.")}</p><Button onClick={() => (activeNav === "Library" || activeNav === "Favorite Songs") && !query ? navigate("Browse") : setQuery("")}>{(activeNav === "Library" || activeNav === "Favorite Songs") && !query ? "Browse music" : "Clear search"}</Button></div>}
             </section>}
 
-            {!query && ["Browse", "Songs"].includes(activeNav) && (
-              <div className="catalog-sections" aria-label="Browse music by style">
-                {catalogLoading && <section className="catalog-loading"><span /><span /><span /><span /></section>}
-                {catalogSections.map((section) => <section className="catalog-row" key={section.id}>
-                  <div className="section-heading"><div><p className="eyebrow">Explore by sound</p><h2>{section.title}</h2><span className="section-subtitle">{section.subtitle}</span></div><button onClick={() => setQuery(section.title)}>See all <ChevronRight size={16} /></button></div>
-                  <div className="catalog-carousel">
-                    {section.tracks.map((track) => <button className="catalog-card" key={`${section.id}-${track.videoId}`} onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => selectTrack(track)}>
-                      <span className="catalog-cover"><Image src={artworkUrl(track.cover)} alt="" width={220} height={220} unoptimized /><i><Play size={18} fill="currentColor" /></i></span>
-                      <strong>{track.title}</strong><small>{track.artist}</small><em>{track.album}</em>
-                    </button>)}
+            {!query && activeNav === "Browse" && !detailOpen && (
+              <section className="genre-browser" aria-label="Moods and genres">
+                <div className="genre-browser-copy"><h2>Moods & genres</h2><p>Choose a lane, then keep exploring without opening another page.</p></div>
+                {catalogLoading && <div className="catalog-loading"><span /><span /><span /><span /></div>}
+                {!catalogLoading && catalogSections.length > 0 && <>
+                  <div className="genre-tabs" role="tablist" aria-label="Music styles">
+                    {catalogSections.map((section, index) => <button role="tab" aria-selected={selectedCatalogSection?.id === section.id} className={selectedCatalogSection?.id === section.id ? "active" : ""} data-tone={index % 6} key={section.id} onClick={() => setActiveCatalogId(section.id)}><span>{section.title}</span><small>{section.tracks.length} tracks</small></button>)}
+                    {["Focus", "Feel good", "Workout", "Late night"].map((mood, index) => <button role="tab" aria-selected="false" data-tone={(catalogSections.length + index) % 6} key={mood} onClick={() => { setQuery(mood); setSearchFocused(true); }}><span>{mood}</span><small>Search mood</small></button>)}
                   </div>
-                </section>)}
-              </div>
+                  {selectedCatalogSection && <div className="genre-selection" role="tabpanel">
+                    <div className="genre-selection-heading"><div><h3>{selectedCatalogSection.title}</h3><p>{selectedCatalogSection.subtitle}</p></div><button disabled={!selectedCatalogSection.tracks[0]} onClick={() => { const seed = selectedCatalogSection.tracks[0]; if (seed) void startRadio(seed); }}><Radio size={16} /> Start radio</button></div>
+                    <div className="catalog-carousel">
+                      {selectedCatalogSection.tracks.map((track) => <button className="catalog-card" key={`${selectedCatalogSection.id}-${track.videoId}`} onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => selectTrack(track)}>
+                        <span className="catalog-cover"><Image src={artworkUrl(track.cover)} alt="" width={220} height={220} unoptimized /><i><Play size={18} fill="currentColor" /></i></span>
+                        <strong>{track.title}</strong><small>{track.artist}</small><em>{track.album}</em>
+                      </button>)}
+                    </div>
+                  </div>}
+                </>}
+              </section>
             )}
 
             {!query && activeNav === "Browse" && (
@@ -1439,8 +1549,8 @@ export default function HomePage() {
 
         <footer className="player">
           <div className="now-playing">
-            <button className={playing ? "player-track-open is-playing" : "player-track-open"} onClick={() => { setDetailOpen(true); navigate("Browse"); }} aria-label={`Open ${current.title}`}><Image key={current.videoId} className="track-art-motion" src={artworkUrl(current.cover)} alt={`${current.title} thumbnail`} width={58} height={58} unoptimized /></button>
-            <button className="player-track-copy" onClick={() => { setDetailOpen(true); navigate("Browse"); }}><strong>{current.title}</strong><span>{current.artist}</span>{playerRecovery && <small>Retrying the same recording…</small>}{playerError && <small>This recording is temporarily unavailable</small>}</button>
+            <button className={playing ? "player-track-open is-playing" : "player-track-open"} onClick={openNowPlaying} aria-label={`Open ${current.title}`}><Image key={current.videoId} className="track-art-motion" src={artworkUrl(current.cover)} alt={`${current.title} thumbnail`} width={58} height={58} unoptimized /></button>
+            <button className="player-track-copy" onClick={openNowPlaying}><strong>{current.title}</strong><span>{current.artist}</span>{playerRecovery && <small>Retrying the same recording…</small>}{playerError && <small>This recording is temporarily unavailable</small>}</button>
             <button className={liked.includes(current.id) ? "liked" : ""} onClick={() => toggleLike(current.id)} aria-label="Like current track"><Heart size={18} fill={liked.includes(current.id) ? "currentColor" : "none"} /></button>
             <button className="queue-open-short" onClick={() => setQueueOpen(true)} aria-label={`Open queue with ${upNext.length} songs`}><ListMusic size={18} />{upNext.length > 0 && <i>{upNext.length}</i>}</button>
           </div>
@@ -1490,18 +1600,25 @@ export default function HomePage() {
           </SheetContent>
         </Sheet>
         <Dialog open={profileOpen} onOpenChange={setProfileOpen}>
-          <DialogContent className="profile-dialog">
-            <DialogHeader>
-              <div className="profile-cover"><div className="profile-dialog-avatar">{viewerInitials}</div><Sparkles /></div>
-              <p className="eyebrow">Your Luma profile</p>
-              <DialogTitle>{viewerName}</DialogTitle>
-              <DialogDescription>{viewer?.email || "Your listening profile lives on this device"}</DialogDescription>
-            </DialogHeader>
-            <label className="profile-name-field"><span>Display name</span><input value={profileDraft} maxLength={60} onChange={(event) => setProfileDraft(event.target.value)} placeholder="Your name" /></label>
-            <div className="profile-stats"><div><strong>{likedTracks.length}</strong><span>Liked</span></div><div><strong>{listeningHistory.length}</strong><span>Played</span></div><div><strong>{topArtist}</strong><span>Top artist</span></div></div>
-            <div className="profile-taste"><span>Your sound</span><div>{tasteSeeds.slice(0, 4).map((artist) => <button key={artist} onClick={() => { openArtist(artist); setProfileOpen(false); }}>{artist}</button>)}</div></div>
-            <div className="profile-status"><span className={backendReady ? "service-dot online" : "service-dot"} />{backendReady ? "Local audio service connected" : "Local audio service offline"}</div>
-            <div className="profile-actions"><Button onClick={() => { setProfileName(profileDraft.trim().slice(0, 60)); setProfileOpen(false); }}>Save profile</Button><Button variant="secondary" onClick={() => { navigate("Favorite Songs"); setProfileOpen(false); }}>Open library</Button>{viewer && <a href="/signout-with-chatgpt?return_to=/" target="_top">Sign out</a>}</div>
+          <DialogContent className="profile-dialog profile-dialog-redesigned" style={{ "--profile-accent": profileAccent } as React.CSSProperties}>
+            <div className="profile-layout">
+              <section className="profile-identity">
+                <div className="profile-identity-art"><Image src={artworkUrl(current.cover)} alt="" width={240} height={240} unoptimized /><span>{viewerInitials}</span></div>
+                <div className="profile-identity-copy"><small>Listening as</small><h2>{viewerName}</h2><p>{topArtist}{tasteSeeds[1] ? `, ${tasteSeeds[1]}` : ""} and more shape your home.</p></div>
+                <div className="profile-stats-line"><span><strong>{likedTracks.length}</strong> liked</span><i /><span><strong>{listeningHistory.length}</strong> played</span></div>
+              </section>
+              <section className="profile-editor">
+                <DialogHeader>
+                  <DialogTitle>Your listening identity</DialogTitle>
+                  <DialogDescription>{viewer?.email || "Stored privately on this device"}</DialogDescription>
+                </DialogHeader>
+                <label className="profile-name-field"><span>Display name</span><input value={profileDraft} maxLength={60} onChange={(event) => setProfileDraft(event.target.value)} placeholder="How should Luma call you?" /></label>
+                <div className="profile-accent-field"><span>Profile color</span><div>{profileColors.map((color) => <button key={color} style={{ backgroundColor: color }} className={profileAccent === color ? "active" : ""} onClick={() => setProfileAccent(color)} aria-pressed={profileAccent === color} aria-label={`Use ${color} as profile color`}>{profileAccent === color && <Check size={15} />}</button>)}</div></div>
+                <div className="profile-taste"><span>Your sound</span><div>{tasteSeeds.slice(0, 4).map((artist) => <button key={artist} onClick={() => { openArtist(artist); setProfileOpen(false); }}>{artist}</button>)}</div></div>
+                <div className="profile-status"><span className={backendReady ? "service-dot online" : "service-dot"} />{backendReady ? "Local audio service connected" : "Local audio service offline"}</div>
+                <div className="profile-actions"><Button onClick={() => { setProfileName(profileDraft.trim().slice(0, 60)); setProfileOpen(false); }}>Save changes</Button><Button variant="secondary" onClick={() => { navigate("Favorite Songs"); setProfileOpen(false); }}>Open library</Button>{viewer && <a href="/signout-with-chatgpt?return_to=/" target="_top">Sign out</a>}</div>
+              </section>
+            </div>
           </DialogContent>
         </Dialog>
         <Dialog open={playlistOpen} onOpenChange={setPlaylistOpen}>

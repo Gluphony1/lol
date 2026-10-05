@@ -1,5 +1,6 @@
 import { existsSync, rmSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
+import { networkInterfaces } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -8,6 +9,18 @@ const runFramework = path.join(root, "scripts", "run-framework.mjs");
 const python = process.platform === "win32"
   ? path.join(root, ".venv", "Scripts", "python.exe")
   : path.join(root, ".venv", "bin", "python");
+const useTailscale = process.argv.includes("--tailscale");
+const tailscaleAddress = Object.entries(networkInterfaces())
+  .find(([name]) => name.toLowerCase().includes("tailscale"))?.[1]
+  ?.find((address) => address.family === "IPv4" && !address.internal)?.address;
+
+if (useTailscale && !tailscaleAddress) {
+  console.error("Tailscale is not connected or has no IPv4 address.");
+  process.exit(1);
+}
+
+const bindHost = useTailscale ? tailscaleAddress : "127.0.0.1";
+const publicOrigin = `http://${bindHost}:8787`;
 
 const responds = async (url) => {
   try {
@@ -24,12 +37,12 @@ if (!existsSync(python)) {
 }
 
 const [webRunning, audioRunning] = await Promise.all([
-  responds("http://127.0.0.1:8787/"),
-  responds("http://127.0.0.1:8765/health"),
+  responds(`${publicOrigin}/`),
+  responds(`http://${bindHost}:8765/health`),
 ]);
 
 if (webRunning && audioRunning) {
-  console.log("Luma is already running at http://127.0.0.1:8787");
+  console.log(`Luma is already running at ${publicOrigin}`);
   console.log("Use the original terminal and press Ctrl+C when you want to stop it.");
   process.exit(0);
 }
@@ -68,6 +81,11 @@ const processes = [
   spawn(python, [path.join(root, "local-backend", "server.py")], {
     cwd: root,
     stdio: "inherit",
+    env: {
+      ...process.env,
+      LUMA_HOST: bindHost,
+      LUMA_ALLOWED_ORIGINS: publicOrigin,
+    },
   }),
   spawn(process.execPath, [
     "--import",
@@ -80,7 +98,7 @@ const processes = [
     "--persist-to",
     path.join(root, ".wrangler", "state"),
     "--ip",
-    "127.0.0.1",
+    bindHost,
     "--inspector-port",
     "0",
   ], {
@@ -88,6 +106,9 @@ const processes = [
     stdio: "inherit",
   }),
 ];
+
+console.log(`Luma web will be available at ${publicOrigin}`);
+if (useTailscale) console.log(`Luma audio will be available to the tailnet at http://${bindHost}:8765`);
 
 let closing = false;
 const shutdown = () => {

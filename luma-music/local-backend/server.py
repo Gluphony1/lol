@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import threading
@@ -15,14 +16,15 @@ import yt_dlp
 from ytmusicapi import YTMusic
 
 
-HOST = "127.0.0.1"
-PORT = 8765
+HOST = os.environ.get("LUMA_HOST", "127.0.0.1")
+PORT = int(os.environ.get("LUMA_PORT", "8765"))
 VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 ALLOWED_ORIGINS = {
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:8787",
     "http://127.0.0.1:8787",
+    *filter(None, os.environ.get("LUMA_ALLOWED_ORIGINS", "").split(",")),
 }
 
 
