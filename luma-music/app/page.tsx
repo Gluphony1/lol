@@ -406,6 +406,13 @@ export default function HomePage() {
     }
     return [...unique.values()].slice(0, 8);
   }, [current.videoId, recommendations, results, trackSuggestions, upNext]);
+  const listeningSequence = useMemo(() => {
+    const unique = new Map<string, Track>();
+    for (const track of [...upNext, ...autoplayTracks]) {
+      if (track.videoId !== current.videoId && !unique.has(track.videoId)) unique.set(track.videoId, track);
+    }
+    return [...unique.values()].slice(0, 10);
+  }, [autoplayTracks, current.videoId, upNext]);
   const activeLyricIndex = useMemo(() => {
     let active = -1;
     for (let index = 0; index < lyrics.length; index += 1) {
@@ -651,6 +658,14 @@ export default function HomePage() {
     setAlbumRelease(null);
     setActiveNav("Albums");
     setQuery(`${album.title} ${album.artist}`.trim());
+  };
+
+  const openTrackAlbum = (track: Track) => {
+    if (track.albumId) {
+      openAlbum({ type: "album", id: track.albumId, title: track.album || track.title, artist: track.artist, cover: track.cover });
+      return;
+    }
+    setQuery(`${track.album} ${track.artist}`.trim());
   };
 
   const loadMoreRecommendations = async () => {
@@ -1234,11 +1249,20 @@ export default function HomePage() {
                   </div>
                 </article>
                 <aside className="suggestions-card">
-                  <div className="lyrics-heading"><div><p className="eyebrow">Up next</p><h2>You might also like</h2></div><Sparkles size={18} /></div>
+                  <div className="lyrics-heading suggestion-heading"><div><p>Listening sequence</p><h2>You might also like</h2><span>Current track, queue, then related autoplay.</span></div><span className="sequence-count">{listeningSequence.length + 1} tracks</span></div>
                   <div className="suggestion-list">
-                    {trackSuggestions.map((track, index) => <button key={track.videoId} className="suggestion-row" onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => { autoplayPlayedRef.current.add(track.videoId); selectTrack(track); }}><span>{String(index + 1).padStart(2, "0")}</span><Image src={artworkUrl(track.cover)} alt="" width={48} height={48} unoptimized /><span><strong>{track.title}</strong><small>{track.artist}</small></span><Play size={15} fill="currentColor" /></button>)}
+                    <button className="suggestion-now" onClick={togglePlayback} aria-label={playing ? `Pause ${current.title}` : `Play ${current.title}`}>
+                      <span className={playing ? "sequence-art is-playing" : "sequence-art"}><Image src={artworkUrl(current.cover)} alt="" width={64} height={64} unoptimized /><i /><i /><i /></span>
+                      <span><small>NOW PLAYING</small><strong>{current.title}</strong><em>{current.artist} · {formatTime(progress)} / {formatTime(timelineDuration)}</em><span className="sequence-progress"><i style={{ transform: `scaleX(${timelineDuration ? Math.min(1, progress / timelineDuration) : 0})` }} /></span></span>
+                      {playing ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
+                    </button>
+                    <div className="sequence-divider"><span>Coming up</span><i /></div>
+                    {listeningSequence.map((track, index) => {
+                      const queued = upNext.some((item) => item.videoId === track.videoId);
+                      return <button key={track.videoId} className="suggestion-row" onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => { autoplayPlayedRef.current.add(track.videoId); if (queued) playFromQueue(track); else selectTrack(track); }}><span>{index === 0 ? "NEXT" : String(index + 1).padStart(2, "0")}</span><Image src={artworkUrl(track.cover)} alt="" width={48} height={48} unoptimized /><span><strong>{track.title}</strong><small>{track.artist}{queued ? " · Queue" : " · Autoplay"}</small></span><Play size={15} fill="currentColor" /></button>;
+                    })}
                     {suggestionsLoading && <div className="suggestion-loading">Adding more suggestions…</div>}
-                    {!suggestionsLoading && trackSuggestions.length === 0 && <div className="suggestion-loading">Play another song to refresh suggestions.</div>}
+                    {!suggestionsLoading && listeningSequence.length === 0 && <div className="suggestion-loading">Play another song to build the next sequence.</div>}
                   </div>
                 </aside>
               </section>
@@ -1289,10 +1313,15 @@ export default function HomePage() {
             )}
 
             {!query && activeNav === "Albums" && (
-              <section className="section-block collection-view">
-                <div className="section-heading"><div><p className="eyebrow">Refreshed from your listening</p><h2>Albums for you</h2></div><span className="section-note">A different mix each visit</span></div>
-                <div className="album-carousel roomy">
-                  {albumGroups.slice(0, 30).map((track) => <button className="catalog-card" key={`${track.album}-${track.artist}`} onClick={() => track.albumId ? openAlbum({ type: "album", id: track.albumId, title: track.album || track.title, artist: track.artist, cover: track.cover }) : setQuery(`${track.album} ${track.artist}`)}><span className="catalog-cover"><Image src={artworkUrl(track.cover)} alt="" width={240} height={240} unoptimized /><i><ChevronRight size={18} /></i></span><strong>{track.album || track.title}</strong><small>{track.artist}</small><em>Album</em></button>)}
+              <section className="section-block collection-view album-collection">
+                <div className="section-heading collection-heading"><div><h2>Albums for you</h2><p>A living shelf built from artists and songs you return to.</p></div><span className="collection-count">{albumGroups.length} releases</span></div>
+                {albumGroups[0] && <button className="album-feature" onClick={() => openTrackAlbum(albumGroups[0])}>
+                  <Image src={artworkUrl(albumGroups[0].cover)} alt={`${albumGroups[0].album} cover`} width={360} height={360} unoptimized />
+                  <span className="album-feature-copy"><small>FEATURED FROM YOUR LISTENING</small><strong>{albumGroups[0].album || albumGroups[0].title}</strong><em>{albumGroups[0].artist}</em><span>{albumGroups[0].reason || `Because ${albumGroups[0].artist} fits your recent rotation.`}</span><b><Play size={16} fill="currentColor" /> Open album</b></span>
+                  <span className="album-feature-number">01</span>
+                </button>}
+                <div className="album-library-grid">
+                  {albumGroups.slice(1, 17).map((track, index) => <button className="album-library-card" key={`${track.album}-${track.artist}`} onClick={() => openTrackAlbum(track)}><span className="catalog-cover"><Image src={artworkUrl(track.cover)} alt={`${track.album} cover`} width={260} height={260} unoptimized /><i><ChevronRight size={18} /></i><small>{String(index + 2).padStart(2, "0")}</small></span><strong>{track.album || track.title}</strong><span>{track.artist}</span><em>Album · For you</em></button>)}
                 </div>
               </section>
             )}
@@ -1317,6 +1346,7 @@ export default function HomePage() {
 
             {!selectedArtist && !selectedAlbum && (query || !["Albums", "Artists", "Radio"].includes(activeNav)) && <section className="section-block recommendations-section">
               <div className="section-heading recommendation-heading"><div><h2>{query ? "Songs" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Recently Played" ? "Recently played" : activeNav === "Local Files" ? "Local songs" : activeNav === "Songs" ? "Songs picked for you" : "Picked for you"}</h2><p>{query ? "Only music releases matching your search." : activeNav === "Library" || activeNav === "Favorite Songs" ? "The music you chose to keep close." : activeNav === "Recently Played" ? "Continue from where you left off." : activeNav === "Local Files" ? "Private tracks stored on this device." : recommendations.length ? "A growing mix shaped by what you actually play." : "Play a few songs and Luma will learn your taste."}</p></div>{!query && ["Browse", "Songs"].includes(activeNav) && <span className="recommendation-status">{moreRecommendationsLoading ? "Finding more…" : `${results.length} songs in your mix`}</span>}</div>
+              {!query && ["Browse", "Songs"].includes(activeNav) && <div className="recommendation-context"><span><Sparkles size={14} /> Personal mix</span><span>Based on {tasteSeeds.slice(0, 3).join(", ") || current.artist}</span><span>{results.length} tracks · updates while you listen</span></div>}
               <div className={!query && ["Browse", "Songs"].includes(activeNav) ? "carousel-frame recommendation-frame" : undefined}>
               {!query && ["Browse", "Songs"].includes(activeNav) && <button className="carousel-arrow previous" onClick={() => scrollPicked(-1)} disabled={!pickedScroll.canPrev} aria-label="Previous recommendations"><ChevronLeft /></button>}
               <div ref={!query && ["Browse", "Songs"].includes(activeNav) ? pickedCarouselRef : undefined} className={query ? "album-grid search-grid" : "album-carousel"} onScroll={(event) => { const element = event.currentTarget; setPickedScroll(readCarouselPosition(element)); if (!query && element.scrollWidth - element.scrollLeft - element.clientWidth < element.clientWidth) void loadMoreRecommendations(); }}>
@@ -1373,18 +1403,22 @@ export default function HomePage() {
 
             {!query && activeNav === "Browse" && (
               <section className="section-block track-section">
-                <div className="section-heading"><div><p className="eyebrow">Recently played</p><h2>Back in rotation</h2></div></div>
-                <div className="track-list">
-                  {recentTracks.slice(0, 4).map((track, index) => (
-                    <button className="track-row" key={track.id} onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => selectTrack(track)}>
+                <div className="section-heading rotation-heading"><div><h2>Back in rotation</h2><p>Your latest plays, with the records they came from.</p></div><span>{listeningHistory.length || recentTracks.length} recently played</span></div>
+                <div className="track-list rotation-list">
+                  <div className="rotation-columns" aria-hidden="true"><span>#</span><span>Track</span><span>Album</span><span>Listening</span><span>Time</span><span /></div>
+                  {recentTracks.slice(0, 8).map((track, index) => {
+                    const historyItem = listeningHistory.find((item) => item.track.videoId === track.videoId);
+                    return (
+                    <button className={current.videoId === track.videoId ? "track-row active" : "track-row"} key={track.id} onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => selectTrack(track)}>
                       <span className="track-number">{current.videoId === track.videoId && playing ? <span className="playing-bars"><i /><i /><i /></span> : String(index + 1).padStart(2, "0")}</span>
                       <Image src={artworkUrl(track.cover)} alt="" width={52} height={52} unoptimized />
                       <span className="track-title"><strong>{track.title}</strong><small>{track.artist}</small></span>
                       <span className="track-album">{track.album}</span>
+                      <span className="track-history">{historyItem ? `${historyItem.plays} ${historyItem.plays === 1 ? "play" : "plays"}` : "From your mix"}</span>
                       <span className="track-duration">{track.duration}</span>
                       <MoreHorizontal size={18} />
                     </button>
-                  ))}
+                  );})}
                 </div>
               </section>
             )}
