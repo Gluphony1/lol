@@ -1010,6 +1010,14 @@ export default function HomePage() {
     setInstallPrompt(null);
   };
 
+  const surfaceKey = selectedAlbum
+    ? `album-${selectedAlbum.id}`
+    : selectedArtist
+      ? `artist-${selectedArtist}`
+      : query
+        ? "search"
+        : `${activeNav}-${activeNav === "Browse" && detailOpen ? "detail" : "index"}`;
+
   return (
     <TooltipProvider>
       <div className="app-shell" style={{ "--track-accent": current.color } as React.CSSProperties}>
@@ -1073,6 +1081,7 @@ export default function HomePage() {
           </header>
 
           <div className="scroll-area">
+            <div className="view-stage" key={surfaceKey}>
             <section className="intro-row">
               <div><p className="eyebrow">Luma music</p><h1>{selectedAlbum ? selectedAlbum.title : selectedArtist || (query ? "Search results" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Browse" && detailOpen ? current.title : activeNav)}</h1></div>
               <p>{query ? searching ? "Finding songs and official music releases…" : `${results.length} music results` : activeNav === "Browse" ? "Music, albums and artists tuned to what you actually play." : activeNav === "Local Files" ? "Music from this device stays private in your browser." : "Explore your music without leaving the flow."}</p>
@@ -1089,14 +1098,17 @@ export default function HomePage() {
             )}
 
             {!query && activeNav === "Browse" && (
-              <section className="home-focus" aria-label="Continue listening">
-                <Image src={artworkUrl(current.cover)} alt={`${current.title} cover`} width={280} height={280} priority unoptimized />
+              <section className={playing ? "home-focus is-playing" : "home-focus"} aria-label="Continue listening">
+                <div className="hero-art-stage">
+                  <Image key={current.videoId} className="track-art-motion" src={artworkUrl(current.cover)} alt={`${current.title} cover`} width={280} height={280} priority unoptimized />
+                  <span className="playback-wave" aria-hidden="true"><i /><i /><i /><i /><i /></span>
+                </div>
                 <div className="home-focus-copy">
                   <span className="feature-label"><Sparkles size={14} /> Continue listening</span>
                   <h2>{current.title}</h2>
                   <button className="hero-artist" onClick={() => openArtist(current.artist)}>{current.artist}</button>
                   <div className="hero-actions">
-                    <Button className="hero-play" onClick={togglePlayback}>{playing ? <Pause fill="currentColor" /> : <Play fill="currentColor" />} {playing ? "Pause" : "Play"}</Button>
+                    <Button className="hero-play" onClick={togglePlayback}><span className="transport-icon" key={playing ? "pause" : "play"}>{playing ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}</span> {playing ? "Pause" : "Play"}</Button>
                     <button className={liked.includes(current.id) ? "round-secondary liked" : "round-secondary"} aria-label="Like current song" onClick={() => toggleLike(current.id)}><Heart size={19} fill={liked.includes(current.id) ? "currentColor" : "none"} /></button>
                   </div>
                 </div>
@@ -1213,10 +1225,10 @@ export default function HomePage() {
               <div className="section-heading"><div><p className="eyebrow">{query ? "Music only" : activeNav === "Library" || activeNav === "Favorite Songs" ? "Inside this collection" : activeNav === "Recently Played" ? "Your listening history" : activeNav === "Local Files" ? "On this device" : recommendations.length ? "Recommended from your listening" : "Start your profile"}</p><h2>{query ? "Songs" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Recently Played" ? "Recently played" : activeNav === "Local Files" ? "Local songs" : activeNav === "Songs" ? "Songs picked for you" : "Picked for you"}</h2></div>{!query && ["Browse", "Songs"].includes(activeNav) && <div className="carousel-controls"><span>{moreRecommendationsLoading ? "Finding more…" : "More like what you play"}</span><button onClick={() => scrollPicked(-1)} aria-label="Scroll recommendations left"><ChevronLeft /></button><button onClick={() => scrollPicked(1)} aria-label="Scroll recommendations right"><ChevronRight /></button></div>}</div>
               <div ref={!query && ["Browse", "Songs"].includes(activeNav) ? pickedCarouselRef : undefined} className={query ? "album-grid search-grid" : "album-carousel"} onScroll={(event) => { const element = event.currentTarget; if (!query && element.scrollWidth - element.scrollLeft - element.clientWidth < element.clientWidth) void loadMoreRecommendations(); }}>
                 {results.slice(0, query ? 18 : ["Browse", "Songs"].includes(activeNav) ? 60 : 30).map((track) => (
-                  <article className={current.videoId === track.videoId ? "album-card selected" : "album-card"} key={track.id}>
+                  <article className={current.videoId === track.videoId ? `album-card selected${playing ? " is-playing" : ""}` : "album-card"} key={track.id}>
                     <button className="cover-button" onMouseEnter={() => warmTrack(track)} onFocus={() => warmTrack(track)} onClick={() => selectTrack(track)} aria-label={`Play ${track.title} by ${track.artist}`}>
                       <Image src={artworkUrl(track.cover)} alt="" width={360} height={360} unoptimized />
-                      <span className="card-play">{current.videoId === track.videoId && playing ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}</span>
+                      <span className="card-play"><span className="transport-icon" key={current.videoId === track.videoId && playing ? "pause" : "play"}>{current.videoId === track.videoId && playing ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}</span></span>
                       <span className="card-index">♪</span>
                     </button>
                     <div className="card-meta">
@@ -1277,6 +1289,7 @@ export default function HomePage() {
                 </div>
               </section>
             )}
+            </div>
           </div>
         </main>
 
@@ -1293,7 +1306,7 @@ export default function HomePage() {
 
         <footer className="player">
           <div className="now-playing">
-            <button className="player-track-open" onClick={() => { setDetailOpen(true); navigate("Browse"); }} aria-label={`Open ${current.title}`}><Image src={artworkUrl(current.cover)} alt={`${current.title} thumbnail`} width={58} height={58} unoptimized /></button>
+            <button className={playing ? "player-track-open is-playing" : "player-track-open"} onClick={() => { setDetailOpen(true); navigate("Browse"); }} aria-label={`Open ${current.title}`}><Image key={current.videoId} className="track-art-motion" src={artworkUrl(current.cover)} alt={`${current.title} thumbnail`} width={58} height={58} unoptimized /></button>
             <button className="player-track-copy" onClick={() => { setDetailOpen(true); navigate("Browse"); }}><strong>{current.title}</strong><span>{current.artist}</span>{playerRecovery && <small>Retrying the same recording…</small>}{playerError && <small>This recording is temporarily unavailable</small>}</button>
             <button className={liked.includes(current.id) ? "liked" : ""} onClick={() => toggleLike(current.id)} aria-label="Like current track"><Heart size={18} fill={liked.includes(current.id) ? "currentColor" : "none"} /></button>
             <button className="queue-open-short" onClick={() => setQueueOpen(true)} aria-label={`Open queue with ${upNext.length} songs`}><ListMusic size={18} />{upNext.length > 0 && <i>{upNext.length}</i>}</button>
@@ -1303,7 +1316,7 @@ export default function HomePage() {
             <div className="transport-buttons">
               <Tooltip><TooltipTrigger asChild><button className={shuffleEnabled ? "active" : ""} aria-label="Shuffle" aria-pressed={shuffleEnabled} onClick={() => setShuffleEnabled((value) => !value)}><Shuffle size={16} /></button></TooltipTrigger><TooltipContent>Shuffle</TooltipContent></Tooltip>
               <button aria-label="Previous track" onClick={() => stepTrack(-1)}><SkipBack size={19} fill="currentColor" /></button>
-              <button className="main-play" aria-label={playing ? "Pause" : "Play"} onClick={togglePlayback}>{playing ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}</button>
+              <button className="main-play" aria-label={playing ? "Pause" : "Play"} onClick={togglePlayback}><span className="transport-icon" key={playing ? "pause" : "play"}>{playing ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}</span></button>
               <button aria-label="Next track" onClick={() => stepTrack(1)}><SkipForward size={19} fill="currentColor" /></button>
               <Tooltip><TooltipTrigger asChild><button className={repeatEnabled ? "active" : ""} aria-label="Repeat" aria-pressed={repeatEnabled} onClick={() => setRepeatEnabled((value) => !value)}><Repeat2 size={17} /></button></TooltipTrigger><TooltipContent>Repeat</TooltipContent></Tooltip>
             </div>
