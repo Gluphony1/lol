@@ -24,6 +24,19 @@ ALLOWED_ORIGINS = {
     "http://localhost:8787",
     "http://127.0.0.1:8787",
 }
+
+
+def origin_allowed(origin: str | None) -> bool:
+    if not origin:
+        return True
+    if origin in ALLOWED_ORIGINS:
+        return True
+    try:
+        parsed = urllib.parse.urlparse(origin)
+        hostname = parsed.hostname or ""
+        return parsed.scheme == "https" and hostname.endswith(".ts.net")
+    except ValueError:
+        return False
 RESOLVE_TTL_SECONDS = 20 * 60
 SEARCH_LIMIT = 18
 MAX_CACHE_ITEMS = 256
@@ -797,7 +810,7 @@ class LumaHandler(BaseHTTPRequestHandler):
 
     def cors_headers(self) -> None:
         origin = self.headers.get("Origin")
-        if origin in ALLOWED_ORIGINS:
+        if origin and origin_allowed(origin):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
@@ -827,7 +840,7 @@ class LumaHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         origin = self.headers.get("Origin")
-        if origin and origin not in ALLOWED_ORIGINS:
+        if not origin_allowed(origin):
             self.send_json(403, {"error": "Origin not allowed."})
             return
         if len(self.path) > 2048:

@@ -156,7 +156,9 @@ const tracks: Track[] = [
   { id: "eVli-tstM5E", title: "Espresso", artist: "Sabrina Carpenter", album: "Short n' Sweet", cover: "https://i.ytimg.com/vi/eVli-tstM5E/hqdefault.jpg", color: "#22d3ee", duration: "3:21", videoId: "eVli-tstM5E" },
 ];
 
-const LOCAL_AUDIO_API = "http://127.0.0.1:8765";
+const LOCAL_AUDIO_API = typeof window !== "undefined" && !["127.0.0.1", "localhost"].includes(window.location.hostname)
+  ? `${window.location.protocol}//${window.location.hostname}:8443`
+  : "http://127.0.0.1:8765";
 const resultColors = ["#ff5ca8", "#60a5fa", "#a78bfa", "#fb7185", "#818cf8", "#22d3ee"];
 const artworkUrl = (cover: string) => {
   if (!cover.startsWith("https://")) return cover;
@@ -278,6 +280,7 @@ export default function HomePage() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [playerRecovery, setPlayerRecovery] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const scrollAreaRef = useRef<HTMLDivElement | null>(null);
   const lyricsScrollRef = useRef<HTMLDivElement | null>(null);
   const pickedCarouselRef = useRef<HTMLDivElement | null>(null);
   const lyricLineRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -429,6 +432,7 @@ export default function HomePage() {
     setDetailOpen(true);
     setActiveNav("Browse");
     setQuery("");
+    requestAnimationFrame(() => scrollAreaRef.current?.scrollTo({ top: 0, behavior: "smooth" }));
     setListeningHistory((items) => {
       const existing = items.find((item) => item.track.videoId === track.videoId);
       const next = existing
@@ -608,6 +612,7 @@ export default function HomePage() {
     setSelectedArtist(null);
     setSelectedAlbum(null);
     setAlbumRelease(null);
+    setDetailOpen(false);
     setActiveNav(destination);
     if (destination === "Albums" || destination === "Radio") setDiscoverySalt(crypto.randomUUID());
     if (destination === "Library" || destination === "Favorite Songs") setSelectedPlaylistId(null);
@@ -1080,12 +1085,12 @@ export default function HomePage() {
             </div>
           </header>
 
-          <div className="scroll-area">
+          <div ref={scrollAreaRef} className="scroll-area">
             <div className="view-stage" key={surfaceKey}>
-            <section className="intro-row">
+            {(!detailOpen || activeNav !== "Browse" || query) && <section className="intro-row">
               <div><p className="eyebrow">Luma music</p><h1>{selectedAlbum ? selectedAlbum.title : selectedArtist || (query ? "Search results" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Browse" && detailOpen ? current.title : activeNav)}</h1></div>
               <p>{query ? searching ? "Finding songs and official music releases…" : `${results.length} music results` : activeNav === "Browse" ? "Music, albums and artists tuned to what you actually play." : activeNav === "Local Files" ? "Music from this device stays private in your browser." : "Explore your music without leaving the flow."}</p>
-            </section>
+            </section>}
 
             {query && !selectedArtist && !selectedAlbum && (searchArtists.length > 0 || searchAlbums.length > 0) && (
               <section className="search-entities" aria-label="Artists and albums">
@@ -1097,7 +1102,7 @@ export default function HomePage() {
               </section>
             )}
 
-            {!query && activeNav === "Browse" && (
+            {!query && activeNav === "Browse" && !detailOpen && (
               <section className={playing ? "home-focus is-playing" : "home-focus"} aria-label="Continue listening">
                 <div className="hero-art-stage">
                   <Image key={current.videoId} className="track-art-motion" src={artworkUrl(current.cover)} alt={`${current.title} cover`} width={280} height={280} priority unoptimized />
@@ -1120,7 +1125,34 @@ export default function HomePage() {
               </section>
             )}
 
-            {!query && activeNav === "Browse" && (
+            {!query && activeNav === "Browse" && detailOpen && (
+              <section className={playing ? "now-playing-stage is-playing" : "now-playing-stage"} aria-label={`Now playing ${current.title}`} aria-live="polite">
+                <button className="now-playing-back" onClick={() => setDetailOpen(false)}><ChevronLeft size={17} /> Back to browse</button>
+                <div className="now-playing-art">
+                  <Image key={current.videoId} className="track-art-motion" src={artworkUrl(current.cover)} alt={`${current.title} cover`} width={520} height={520} priority unoptimized />
+                  <span className="now-playing-equalizer" aria-hidden="true"><i /><i /><i /><i /><i /><i /><i /></span>
+                </div>
+                <div className="now-playing-copy">
+                  <span className="now-playing-status"><i />{playing ? "Now playing" : "Ready to play"}</span>
+                  <h1>{current.title}</h1>
+                  <button className="now-playing-artist" onClick={() => openArtist(current.artist)}>{current.artist}</button>
+                  <p>{current.album}</p>
+                  <div className="now-playing-controls">
+                    <button className={liked.includes(current.id) ? "now-playing-like liked" : "now-playing-like"} onClick={() => toggleLike(current.id)} aria-label="Like current song"><Heart size={21} fill={liked.includes(current.id) ? "currentColor" : "none"} /></button>
+                    <button onClick={() => stepTrack(-1)} aria-label="Previous track"><SkipBack size={24} fill="currentColor" /></button>
+                    <button className="now-playing-main" onClick={togglePlayback} aria-label={playing ? "Pause" : "Play"}><span className="transport-icon" key={playing ? "pause" : "play"}>{playing ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" />}</span></button>
+                    <button onClick={() => stepTrack(1)} aria-label="Next track"><SkipForward size={24} fill="currentColor" /></button>
+                    <button onClick={() => setQueueOpen(true)} aria-label="Open play queue"><ListMusic size={21} /></button>
+                  </div>
+                  <div className="now-playing-progress">
+                    <Slider value={[Math.min(progress, timelineDuration)]} max={timelineDuration} onValueChange={(value) => setProgress(value[0])} onValueCommit={(value) => { if (audioRef.current) audioRef.current.currentTime = value[0]; }} aria-label="Track progress" />
+                    <span>{formatTime(progress)}</span><span>{formatTime(timelineDuration)}</span>
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {!query && activeNav === "Browse" && !detailOpen && (
               <section className="popular-artists section-block" aria-label="Popular artists">
                 <div className="section-heading"><div><p className="eyebrow">Artists for you</p><h2>Popular artists</h2></div><button onClick={() => navigate("Artists")}>See all <ChevronRight size={16} /></button></div>
                 <div className="artist-carousel">
@@ -1221,8 +1253,8 @@ export default function HomePage() {
               </section>
             )}
 
-            {!selectedArtist && !selectedAlbum && (query || !["Albums", "Artists", "Radio"].includes(activeNav)) && <section className="section-block">
-              <div className="section-heading"><div><p className="eyebrow">{query ? "Music only" : activeNav === "Library" || activeNav === "Favorite Songs" ? "Inside this collection" : activeNav === "Recently Played" ? "Your listening history" : activeNav === "Local Files" ? "On this device" : recommendations.length ? "Recommended from your listening" : "Start your profile"}</p><h2>{query ? "Songs" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Recently Played" ? "Recently played" : activeNav === "Local Files" ? "Local songs" : activeNav === "Songs" ? "Songs picked for you" : "Picked for you"}</h2></div>{!query && ["Browse", "Songs"].includes(activeNav) && <div className="carousel-controls"><span>{moreRecommendationsLoading ? "Finding more…" : "More like what you play"}</span><button onClick={() => scrollPicked(-1)} aria-label="Scroll recommendations left"><ChevronLeft /></button><button onClick={() => scrollPicked(1)} aria-label="Scroll recommendations right"><ChevronRight /></button></div>}</div>
+            {!selectedArtist && !selectedAlbum && (query || !["Albums", "Artists", "Radio"].includes(activeNav)) && <section className="section-block recommendations-section">
+              <div className="section-heading recommendation-heading"><div><h2>{query ? "Songs" : activeNav === "Library" || activeNav === "Favorite Songs" ? selectedPlaylist?.name || "Favorite songs" : activeNav === "Recently Played" ? "Recently played" : activeNav === "Local Files" ? "Local songs" : activeNav === "Songs" ? "Songs picked for you" : "Picked for you"}</h2><p>{query ? "Only music releases matching your search." : activeNav === "Library" || activeNav === "Favorite Songs" ? "The music you chose to keep close." : activeNav === "Recently Played" ? "Continue from where you left off." : activeNav === "Local Files" ? "Private tracks stored on this device." : recommendations.length ? "A growing mix shaped by what you actually play." : "Play a few songs and Luma will learn your taste."}</p></div>{!query && ["Browse", "Songs"].includes(activeNav) && <div className="carousel-controls"><span>{moreRecommendationsLoading ? "Finding more…" : "More like what you play"}</span><button onClick={() => scrollPicked(-1)} aria-label="Scroll recommendations left"><ChevronLeft /></button><button onClick={() => scrollPicked(1)} aria-label="Scroll recommendations right"><ChevronRight /></button></div>}</div>
               <div ref={!query && ["Browse", "Songs"].includes(activeNav) ? pickedCarouselRef : undefined} className={query ? "album-grid search-grid" : "album-carousel"} onScroll={(event) => { const element = event.currentTarget; if (!query && element.scrollWidth - element.scrollLeft - element.clientWidth < element.clientWidth) void loadMoreRecommendations(); }}>
                 {results.slice(0, query ? 18 : ["Browse", "Songs"].includes(activeNav) ? 60 : 30).map((track) => (
                   <article className={current.videoId === track.videoId ? `album-card selected${playing ? " is-playing" : ""}` : "album-card"} key={track.id}>
